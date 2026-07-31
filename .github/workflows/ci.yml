@@ -32,6 +32,7 @@ jobs:
       smoke-env: |
         IDENTITY_JWKS_URL=http://127.0.0.1:4001/.well-known/jwks.json
         IDENTITY_ISSUER=http://127.0.0.1:4001
+        ACTIVITY_INGEST_SECRETS=ci-only-not-a-real-secret-000000000000
     secrets:
       # @cloudsforge/* is resolved by link:../runtime and link:../contracts, so CI checks out
       # micro-runtime and micro-contracts as siblings — both private, so the workflow needs a
