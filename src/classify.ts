@@ -253,6 +253,66 @@ export const CLASSIFIERS = Object.freeze({
     userId: userFromPayload,
     summary: () => 'A withdrawal has not confirmed within its deadline and is being investigated.',
   },
+  /* ── aetherholm — the third Worlds title, and the first game in the registry ────────────────
+   *
+   * The sixteen categories predate any game: 01-product-vision promises "every account, money,
+   * asset, GAME and governance event on one timeline", and there is no `game` category to put one
+   * in. These five map to the nearest honest homes — founding and provisioning are `ownership`,
+   * completions are `reward`, a season opening is `community` and internal. Adding the missing
+   * category is a schema CHECK change and is recorded as a gap rather than smuggled in here.
+   */
+  'aetherholm.season.opened': {
+    category: 'community',
+    type: 'aetherholm.season_opened',
+    // A world event, not a person's: keyed by season, no user anywhere in it.
+    visibility: 'internal',
+    userId: () => null,
+    summary: (event) => {
+      const name = text(event, 'name', 48)
+      return name ? `Season ${name} opened.` : 'A new season opened.'
+    },
+  },
+  'aetherholm.city.founded': {
+    category: 'ownership',
+    type: 'aetherholm.city_founded',
+    visibility: 'user',
+    // Keyed by CITY id; the user is in the payload (aetherholm/src/cities.ts:183). The session
+    // misattribution above is why this is spelled out rather than left to userFromKey.
+    userId: userFromPayload,
+    summary: (event) => {
+      const name = text(event, 'name', 48)
+      return name ? `You founded ${name}.` : 'You founded a sky-city.'
+    },
+  },
+  'aetherholm.building.completed': {
+    category: 'reward',
+    type: 'aetherholm.building_completed',
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: (event) => {
+      const kind = text(event, 'type', 32)
+      return kind ? `Your ${kind} finished building.` : 'A building finished.'
+    },
+  },
+  'aetherholm.research.completed': {
+    category: 'reward',
+    type: 'aetherholm.research_completed',
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: () => 'Research completed.',
+  },
+  'aetherholm.skerry.provisioned': {
+    category: 'ownership',
+    type: 'aetherholm.skerry_provisioned',
+    visibility: 'user',
+    // Keyed by ENTITLEMENT id; the user is the provision subject
+    // (aetherholm/src/provisioning.ts:109).
+    userId: (event) => {
+      const value = payloadOf(event)['subject']
+      return typeof value === 'string' && UUID_PATTERN.test(value) ? value : null
+    },
+    summary: () => 'Your private skerry is ready.',
+  },
   'billing.entitlement.granted': {
     category: 'billing',
     type: 'billing.entitlement_granted',
