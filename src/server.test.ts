@@ -211,33 +211,47 @@ test('THE RULE: an HMAC-invalid delivery is refused and writes nothing', { skip 
   })
 })
 
-test('a user token cannot write to the canonical feed, whatever roles it carries', { skip }, async () => {
-  // AD-11: written only from the event bus. A signature alone is not enough — the caller must be
-  // a service, and an operator is not a service.
+test('no token of any kind writes to the feed — only a signature does, and a token is not one', { skip }, async () => {
+  // AD-11 held STRONGER than before. The old form authenticated first and demanded a service
+  // principal — which no outbox relay in the estate presents, so the event bus itself was 401'd
+  // by the route built to receive it. Now the MAC over the raw bytes is the only gate: a user or
+  // operator token on a correctly SIGNED delivery is ignored rather than honoured, and the same
+  // tokens without a signature create nothing. There is no code path from any token to a record.
   await withServer({}, async (h) => {
     const event = delivery({ topic: 'wallet.deposit.confirmed', key: 'w-1', payload: { userId: ALICE } })
+    // Signed correctly, token irrelevant: the delivery lands because of the MAC, not the bearer.
+    const signed = await post(h.url, await alice(), event.body, event.signature)
+    assert.equal(signed.status, 201, 'a fresh record; 200 is the duplicate case')
+    // Unsigned, with the most privileged tokens the estate mints: refused, nothing written.
     for (const token of [await alice(), await operator()]) {
-      const res = await post(h.url, token, event.body, event.signature)
-      assert.equal(res.status, 403)
+      const res = await fetch(`${h.url}/ingest`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: event.body,
+      })
+      assert.equal(res.status, 401)
     }
-    assert.equal((await sql<{ n: number }[]>`select count(*)::int as n from activity_records`)[0]?.n, 0)
+    assert.equal((await sql<{ n: number }[]>`select count(*)::int as n from activity_records`)[0]?.n, 1)
   })
 })
 
-test('an unauthenticated ingest is 401 before the body is even parsed', { skip }, async () => {
+test('an unsigned ingest is 401 before the body is even parsed', { skip }, async () => {
+  // Unparseable garbage with no signature: refused by the MAC check, which never parses.
   await withServer({}, async (h) => {
     const res = await fetch(`${h.url}/ingest`, { method: 'POST', body: '{not json' })
     assert.equal(res.status, 401)
   })
 })
 
-test('THE RULE: an unreachable JWKS is 503, never 401', { skip }, async () => {
-  const token = await relay()
+test('ingest survives an unreachable JWKS, because the bus must not die when identity blinks', { skip }, async () => {
+  // The old assertion here was 503-not-401, which was the right rule for a route that consulted
+  // the verifier. This route no longer consults it at all — the MAC is the authentication — and
+  // that is a resilience property worth pinning: an identity outage used to take the whole event
+  // bus down with it, since every delivery 503'd at the verifier before its signature was read.
   const event = delivery({ topic: 'wallet.deposit.confirmed', key: 'w-1', payload: { userId: ALICE } })
   await withServer({ verifier: unreachableVerifier() }, async (h) => {
-    const res = await post(h.url, token, event.body, event.signature)
-    assert.equal(res.status, 503)
-    assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'verifier_unavailable')
+    const res = await post(h.url, await relay(), event.body, event.signature)
+    assert.equal(res.status, 201, 'a fresh record lands while identity is down')
   })
 })
 

@@ -149,9 +149,13 @@ test('the feed filters by category and by product', { skip }, async () => {
     deps,
     parseDelivery(
       delivery({
+        // Identity's REAL envelope: keyed by the SESSION id, user in the payload
+        // (`identity/src/sessions.ts:198-205`). This fixture used to key by ALICE — a shape the
+        // producer never sends — which is why the suite stayed green while every real sign-in
+        // was attributed to its session id and appeared in nobody's feed.
         topic: 'identity.session.created',
-        key: ALICE,
-        payload: { device: 'Firefox on macOS' },
+        key: '9e1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d',
+        payload: { sessionId: '9e1b2c3d-4e5f-4a6b-8c7d-0e1f2a3b4c5d', userId: ALICE, device: 'Firefox on macOS' },
         occurredAt: new Date(BASE + 3 * 60_000),
       }).body,
     ),

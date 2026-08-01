@@ -144,7 +144,12 @@ export const CLASSIFIERS = Object.freeze({
     category: 'security',
     type: 'security.session_created',
     visibility: 'user',
-    userId: userFromKey,
+    // userFromPayload, NOT userFromKey: identity keys this event by SESSION id
+    // (`identity/src/sessions.ts:199`) and names the user in the payload. The key IS a uuid, so
+    // userFromKey happily returned the session id as the "user" and every sign-in landed in
+    // nobody's feed — silently, because a wrong uuid queries as cleanly as a right one. Found by
+    // composing identity next to this service, not by either suite.
+    userId: userFromPayload,
     summary: (event) => {
       const device = text(event, 'device', 48)
       const ip = text(event, 'ipPrefix', 24)
@@ -157,7 +162,9 @@ export const CLASSIFIERS = Object.freeze({
     category: 'security',
     type: 'security.device_added',
     visibility: 'user',
-    userId: userFromKey,
+    // Same repair as session.created: identity keys this by DEVICE id (`identity/src/sessions.ts:184`)
+    // and names the user in the payload.
+    userId: userFromPayload,
     summary: (event) => {
       const device = text(event, 'device', 48)
       return device ? `A new device was used for the first time: ${device}.` : 'A new device was used for the first time.'

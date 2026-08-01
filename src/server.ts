@@ -372,13 +372,23 @@ function buildRoutes(): Route[] {
        * a socket.
        */
       handle: async (ctx, deps) => {
-        const principal = await authenticate(ctx, deps)
-        if (principal.kind !== 'service') {
-          // A user token can never write to the canonical feed, whatever roles it carries.
-          // Activity is written only from the event bus — AD-11.
-          throw new ForbiddenError('a service token')
-        }
-
+        // THE SIGNATURE IS THE AUTHENTICATION, and it is the only gate a producer can pass.
+        //
+        // This handler used to call `authenticate()` first and demand a service principal — and
+        // no producer in the estate could satisfy it: every outbox relay (identity's
+        // `outbox.ts` deliver(), and the same shape in every sibling) sends the HMAC signature
+        // and the event id, and NO Authorization header. A relay is a background job; it holds
+        // no bearer and has no way to mint one. So the route the event bus exists to call
+        // answered 401 to the event bus, always — found on the first day a second service was
+        // composed next to this one, which is exactly the class of defect §3.3g says only
+        // deployment catches.
+        //
+        // The bearer added nothing the MAC does not: both are shared-secret proofs, and the MAC
+        // is over the exact bytes received, which a bearer is not. AD-11's intent — a signed-in
+        // person can never write to the canonical feed — holds STRONGER now: a user token is not
+        // "forbidden", it is simply not a signature, and there is no code path from any token to
+        // a record. `trade` and `worlds` shaped their inboxes this way from the start; this
+        // brings the consumer side in line with the producers that already exist.
         const rawBody = await readRaw(ctx.req)
         verifySignature(deps.ingest, rawBody, headerOf(ctx.req, SIGNATURE_HEADER))
         const delivery = parseDelivery(rawBody)
