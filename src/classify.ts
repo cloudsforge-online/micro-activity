@@ -261,6 +261,113 @@ export const CLASSIFIERS = Object.freeze({
    * completions are `reward`, a season opening is `community` and internal. Adding the missing
    * category is a schema CHECK change and is recorded as a gap rather than smuggled in here.
    */
+  /* ── worlds and emberkin — ten topics a live producer emitted before the registry knew them ──
+   * Same keying discipline as the aetherholm five: every userId reader cites the emit line,
+   * because `session.created` keyed-by-session meeting userFromKey is how sign-ins landed in
+   * nobody's feed. The game-category gap stands: these file under the nearest of the sixteen.
+   */
+  'worlds.title.registered': {
+    category: 'community',
+    type: 'worlds.title_registered',
+    // An operator act on the platform, no player subject (`worlds/src/titles.ts:169-176`).
+    visibility: 'internal',
+    userId: () => null,
+    summary: (event) => {
+      const name = text(event, 'name', 48)
+      return name ? `Title registered: ${name}.` : 'A title was registered.'
+    },
+  },
+  'worlds.reward.granted': {
+    category: 'reward',
+    type: 'worlds.reward_granted',
+    visibility: 'user',
+    // Keyed by REWARD id; the user is in the payload (`worlds/src/rewards.ts:470`).
+    userId: userFromPayload,
+    summary: (event) => {
+      const amount = text(event, 'amountShards', 24)
+      return amount ? `You earned ${amount} Shards.` : 'You earned a season reward.'
+    },
+  },
+  'worlds.provision.completed': {
+    category: 'ownership',
+    type: 'worlds.provision_completed',
+    visibility: 'user',
+    // Keyed by ENTITLEMENT id; the user is the provision `subject`
+    // (`worlds/src/provisioning.ts:566-571`), and the actor is the service — the actor fallback
+    // would attribute this to nobody.
+    userId: (event) => {
+      const value = payloadOf(event)['subject']
+      return typeof value === 'string' && UUID_PATTERN.test(value) ? value : null
+    },
+    summary: () => 'Your private world is ready.',
+  },
+  'worlds.provision.failed': {
+    category: 'billing',
+    type: 'worlds.provision_failed',
+    visibility: 'user',
+    // Same subject reader (`worlds/src/provisioning.ts:602-613`): the person who paid must see
+    // the failure in their own feed, since the refund names the entitlement this row carries.
+    userId: (event) => {
+      const value = payloadOf(event)['subject']
+      return typeof value === 'string' && UUID_PATTERN.test(value) ? value : null
+    },
+    summary: () => 'A world purchase could not be delivered and is being looked at.',
+  },
+  'emberkin.achievement.unlocked': {
+    category: 'reward',
+    type: 'emberkin.achievement_unlocked',
+    visibility: 'user',
+    // Keyed `user:code`, NOT a bare uuid (`emberkin/src/battles.ts:204-205`) — userFromKey would
+    // return null; the payload names the user.
+    userId: userFromPayload,
+    summary: (event) => {
+      const name = text(event, 'name', 48)
+      return name ? `Achievement unlocked: ${name}.` : 'Achievement unlocked.'
+    },
+  },
+  'emberkin.battle.resolved': {
+    category: 'reward',
+    type: 'emberkin.battle_resolved',
+    visibility: 'user',
+    // Keyed by BATTLE id; user in the payload (`emberkin/src/battles.ts:215`).
+    userId: userFromPayload,
+    summary: (event) => {
+      const outcome = text(event, 'outcome', 16)
+      return outcome ? `Battle ${outcome}.` : 'A battle resolved.'
+    },
+  },
+  'emberkin.cosmetic.equipped': {
+    category: 'ownership',
+    type: 'emberkin.cosmetic_equipped',
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: () => 'You equipped a cosmetic.',
+  },
+  'emberkin.save.started': {
+    category: 'account',
+    type: 'emberkin.save_started',
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: () => 'You began a new campaign.',
+  },
+  'emberkin.season.started': {
+    category: 'community',
+    type: 'emberkin.season_started',
+    visibility: 'internal',
+    userId: () => null,
+    summary: () => 'A new Emberkin season opened.',
+  },
+  'emberkin.reward.granted': {
+    category: 'reward',
+    type: 'emberkin.reward_granted',
+    visibility: 'user',
+    // Keyed by idempotency key; user in the payload (`emberkin/src/seasons.ts:139`).
+    userId: userFromPayload,
+    summary: (event) => {
+      const amount = text(event, 'amount', 24)
+      return amount ? `You earned ${amount} Shards.` : 'You earned a season reward.'
+    },
+  },
   'aetherholm.season.opened': {
     category: 'community',
     type: 'aetherholm.season_opened',
