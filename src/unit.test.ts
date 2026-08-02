@@ -16,7 +16,7 @@ import { CATEGORIES, STORED_CATEGORIES, UNCLASSIFIED, isCategory } from './categ
 import { CLASSIFIED_TOPICS, CLASSIFIERS, classify, subjectUrnFor } from './classify.ts'
 import { BadCursorError, decodeCursor, encodeCursor } from './records.ts'
 import { MalformedEventError, parseDelivery } from './ingest.ts'
-import { ALICE, SECRET, delivery, unknownTopicDelivery } from './testsupport.ts'
+import { ALICE, BOB, SECRET, delivery, unknownTopicDelivery } from './testsupport.ts'
 
 /* ------------------------------------------------------------------ contracts */
 
@@ -119,6 +119,54 @@ test('an entitlement keyed by an organisation has no single owner and stays inte
 
 test('the subject URN names the owning service and never another', () => {
   assert.equal(subjectUrnFor('custody', 'key', 'k-1'), 'urn:cloudsforge:custody:key:k-1')
+})
+
+test('a battle report lands in the DEFENDER\'s feed — never the raider\'s', () => {
+  // aetherholm.battle.resolved is keyed by battle id and its ACTOR is the attacker
+  // (aetherholm/src/fleets.ts, the `user:` actor on the emit). Both parties are in the payload;
+  // the record is the defender's news. Reading key or actor here would file "your city was
+  // raided" in the raider's feed — the session.created misattribution, with a cannon.
+  const { envelope } = delivery({
+    topic: 'aetherholm.battle.resolved',
+    key: '018f0000-0000-7000-8000-00000000b001',
+    payload: {
+      attackerUserId: BOB,
+      defenderUserId: ALICE,
+      cityName: 'Aerie',
+      outcome: 'raided',
+    },
+  })
+  const classified = classify(envelope, true)
+  assert.equal(classified.userId, ALICE)
+  assert.equal(classified.visibility, 'user')
+  assert.match(classified.summary, /Aerie was raided/)
+  // A repelled attack reads as the defender's win, same owner.
+  const repelled = delivery({
+    topic: 'aetherholm.battle.resolved',
+    key: '018f0000-0000-7000-8000-00000000b002',
+    payload: { attackerUserId: BOB, defenderUserId: ALICE, cityName: 'Aerie', outcome: 'repelled' },
+  })
+  assert.match(classify(repelled.envelope, true).summary, /repelled/)
+})
+
+test('an alliance-held spire has no single owner and stays internal; a lone holder owns it', () => {
+  const alliance = delivery({
+    topic: 'aetherholm.spire.captured',
+    key: '018f0000-0000-7000-8000-00000000c001',
+    payload: { allianceId: '018f0000-0000-7000-8000-00000000d001', allianceName: 'Windward', userIds: [ALICE, BOB] },
+  })
+  const classifiedAlliance = classify(alliance.envelope, true)
+  assert.equal(classifiedAlliance.userId, null)
+  assert.equal(classifiedAlliance.visibility, 'internal')
+
+  const solo = delivery({
+    topic: 'aetherholm.spire.captured',
+    key: '018f0000-0000-7000-8000-00000000c002',
+    payload: { holderUserId: ALICE, userIds: [ALICE] },
+  })
+  const classifiedSolo = classify(solo.envelope, true)
+  assert.equal(classifiedSolo.userId, ALICE)
+  assert.equal(classifiedSolo.visibility, 'user')
 })
 
 /* ------------------------------------------------------------------ delivery parsing */

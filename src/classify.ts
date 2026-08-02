@@ -313,6 +313,61 @@ export const CLASSIFIERS = Object.freeze({
     },
     summary: () => 'Your private skerry is ready.',
   },
+  'aetherholm.battle.resolved': {
+    // The nearest honest home among the sixteen is ownership: the record is about what happened
+    // to YOUR city. Not `reward` — half of these are losses.
+    category: 'ownership',
+    type: 'aetherholm.battle_resolved',
+    visibility: 'user',
+    // Keyed by BATTLE id, actor is the ATTACKER (`user:` prefix on the emit,
+    // aetherholm/src/fleets.ts:497), and the payload carries attackerUserId AND defenderUserId.
+    // The feed record belongs to the DEFENDER — "your city was raided" is their news; the
+    // attacker is watching the fleet screen. Reading `userId`/key/actor here would file the raid
+    // in the raider's feed, which is the session.created misattribution with a cannon.
+    userId: (event) => {
+      const value = payloadOf(event)['defenderUserId']
+      return typeof value === 'string' && UUID_PATTERN.test(value) ? value : null
+    },
+    summary: (event) => {
+      const name = text(event, 'cityName', 48)
+      const city = name ? `Your city ${name}` : 'Your city'
+      const outcome = payloadOf(event)['outcome']
+      if (outcome === 'razed') return `${city} was besieged and razed.`
+      if (outcome === 'repelled') return `${city} repelled an attack.`
+      return `${city} was raided.`
+    },
+  },
+  'aetherholm.spire.captured': {
+    category: 'reward',
+    type: 'aetherholm.spire_captured',
+    visibility: 'user',
+    // Keyed by ISLAND id. A lone holder is named as holderUserId
+    // (aetherholm/src/sealing.ts:243); an alliance holds as a group, in which case there is no
+    // single owner and the record stays internal rather than landing in one member's feed —
+    // the same refusal as billing's organisation-subject entitlements above.
+    userId: (event) => {
+      const value = payloadOf(event)['holderUserId']
+      return typeof value === 'string' && UUID_PATTERN.test(value) ? value : null
+    },
+    summary: (event) => {
+      const alliance = text(event, 'allianceName', 48)
+      return alliance
+        ? `${alliance} held an Aether Spire as the season sealed.`
+        : 'You held an Aether Spire as the season sealed. Heraldry is yours.'
+    },
+  },
+  'aetherholm.season.sealed': {
+    category: 'community',
+    type: 'aetherholm.season_sealed',
+    // A world event, like season.opened: keyed by season, no single user is its subject. The
+    // victors' personal records come from spire.captured.
+    visibility: 'internal',
+    userId: () => null,
+    summary: (event) => {
+      const name = text(event, 'name', 48)
+      return name ? `${name} sealed into the chronicle.` : 'A season sealed into the chronicle.'
+    },
+  },
   'billing.entitlement.granted': {
     category: 'billing',
     type: 'billing.entitlement_granted',
