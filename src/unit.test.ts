@@ -169,6 +169,99 @@ test('an alliance-held spire has no single owner and stays internal; a lone hold
   assert.equal(classifiedSolo.visibility, 'user')
 })
 
+/* ------------------------------------------------------------------ the five */
+
+test('a plain sign-out and a security revocation are not the same entry', () => {
+  // The whole reason `identity.session.revoked` carries a `reason`. notify fires a CRITICAL
+  // notification for every reason except `signed_out` (notify/src/catalogue.ts:258); a timeline
+  // that read both the same way would contradict the alert the user just received.
+  const session = '33333333-3333-4333-8333-333333333333'
+  const revoked = (reason: string) =>
+    classify(delivery({ topic: 'identity.session.revoked', key: session, payload: { sessionId: session, userId: ALICE, reason } }).envelope, true)
+
+  const plain = revoked('signed_out')
+  assert.equal(plain.type, 'security.signed_out')
+  assert.equal(plain.summary, 'You signed out.')
+
+  const burned = revoked('password_reset')
+  assert.equal(burned.type, 'security.session_revoked')
+  assert.match(burned.summary, /password was reset/)
+  assert.notEqual(burned.type, plain.type)
+
+  // A reason this build has never seen — the refresh-family burn at identity/src/server.ts:892 has
+  // no constant — must fall through to the ALARMING sentence, never the reassuring one.
+  const unknown = revoked('refresh_token_reuse')
+  assert.equal(unknown.type, 'security.session_revoked')
+  assert.match(unknown.summary, /change your password/)
+  assert.doesNotMatch(unknown.summary, /You signed out\./)
+
+  // And it is the user's own record, not the session id's. The key IS a uuid, so a userFromKey
+  // reader would have returned the SESSION id here and filed every revocation in nobody's feed.
+  assert.equal(plain.userId, ALICE)
+  assert.equal(plain.visibility, 'user')
+})
+
+test('an MFA factor added reads differently when it replaced one', () => {
+  const added = (payload: Record<string, unknown>) =>
+    classify(delivery({ topic: 'identity.mfa.added', key: ALICE, payload }).envelope, true)
+
+  const fresh = added({ kind: 'totp', replacedPrevious: false, remainingActive: 2 })
+  assert.equal(fresh.category, 'security')
+  assert.equal(fresh.userId, ALICE) // keyed by user_id — identity/src/mfa.ts:566
+  assert.match(fresh.summary, /added to your account/)
+  assert.match(fresh.summary, /totp/)
+
+  assert.match(added({ kind: 'totp', replacedPrevious: true }).summary, /replaced/)
+})
+
+test('a wallet created reads as a link when the user brought their own', () => {
+  const created = (payload: Record<string, unknown>) =>
+    classify(delivery({ topic: 'wallet.wallet.created', key: '44444444-4444-4444-8444-444444444444', payload }).envelope, true)
+
+  const custodial = created({ walletId: 'w-1', userId: ALICE, origin: 'custodial', chain: 'ethereum', network: 'mainnet' })
+  assert.equal(custodial.category, 'wallet')
+  // Keyed by WALLET id, so the user comes off the payload — wallet/src/wallets.ts:219.
+  assert.equal(custodial.userId, ALICE)
+  assert.match(custodial.summary, /created for you/)
+  assert.match(custodial.summary, /ethereum mainnet/)
+
+  const external = created({ walletId: 'w-2', userId: ALICE, origin: 'external', chain: 'ethereum', network: 'mainnet' })
+  assert.match(external.summary, /linked to your account/)
+  assert.notEqual(external.summary, custodial.summary)
+})
+
+test('a proposal opening belongs to no one, and a vote belongs to its voter', () => {
+  const proposal = '55555555-5555-4555-8555-555555555555'
+
+  // No user anywhere on the emit (community/src/jobs.ts:220-227 — actor `service:community`,
+  // payload `{ proposalId, communityId }`). Guessing an owner would file a community-wide fact in
+  // one member's feed; notify is what fans it out to the membership.
+  const opened = classify(
+    delivery({ topic: 'community.proposal.opened', key: proposal, payload: { proposalId: proposal, communityId: 'c-1' } }).envelope,
+    true,
+  )
+  assert.equal(opened.category, 'governance')
+  assert.equal(opened.userId, null)
+  assert.equal(opened.visibility, 'internal')
+
+  // The receipt. The owner field is `voter`, holding `user:<uuid>` — NOT `userId`, and not a bare
+  // uuid. A reader that assumed either would put "was my vote counted" in nobody's feed.
+  const cast = classify(
+    delivery({
+      topic: 'community.vote.cast',
+      key: proposal,
+      payload: { proposalId: proposal, communityId: 'c-1', voter: `user:${ALICE}`, choice: 'for', subjectsCounted: 4 },
+    }).envelope,
+    true,
+  )
+  assert.equal(cast.category, 'governance')
+  assert.equal(cast.userId, ALICE)
+  assert.equal(cast.visibility, 'user')
+  assert.match(cast.summary, /\(for\)/)
+  // A delegate who expected to carry delegators and reads "1" has found a problem worth reporting.
+  assert.match(cast.summary, /counted for 4 members/)
+})
+
 /* ------------------------------------------------------------------ delivery parsing */
 
 test('a well-formed delivery parses through the contract, not around it', () => {

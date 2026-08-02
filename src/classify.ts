@@ -49,7 +49,18 @@ export interface Classified {
 
 interface TopicClassifier {
   readonly category: Category
-  readonly type: string
+  /**
+   * `<category>.<verb>`, or a function of the envelope when one topic carries two facts.
+   *
+   * A function is the exception and needs a reason. `identity.session.revoked` is the reason: it
+   * carries a `reason` field that separates "you pressed sign out" from "your session was burned
+   * because a stolen refresh token was replayed", and `type` is the field a frontend switches on
+   * to choose an icon and an emphasis. One static type for both would render an account takeover
+   * with the same chrome as a sign-out. `notify` already refuses to treat them alike — a critical
+   * notification fires for every reason except `signed_out` (notify/src/catalogue.ts:258) — and a
+   * timeline that collapses the distinction disagrees with the notification the user just got.
+   */
+  readonly type: string | ((envelope: EventEnvelope) => string)
   readonly visibility: Visibility
   readonly userId: (envelope: EventEnvelope) => string | null
   readonly summary: (envelope: EventEnvelope) => string
@@ -104,6 +115,16 @@ function userFromPayload(envelope: EventEnvelope): string | null {
 }
 
 /**
+ * `user:<uuid>` → `<uuid>`. Anything else — an `org:` subject, a bare id, a malformed value —
+ * is null rather than a guess.
+ */
+function subjectUser(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.startsWith('user:')) return null
+  const id = value.slice('user:'.length)
+  return UUID_PATTERN.test(id) ? id : null
+}
+
+/**
  * The key is a `user:<id>` subject, as `billing.entitlement.granted` uses.
  *
  * An entitlement's subject can also be an organisation, in which case there is no single user and
@@ -111,10 +132,50 @@ function userFromPayload(envelope: EventEnvelope): string | null {
  * member's purchase in someone's personal feed.
  */
 function userFromSubjectKey(envelope: EventEnvelope): string | null {
-  const key = envelope.key
-  if (!key.startsWith('user:')) return null
-  const id = key.slice('user:'.length)
-  return UUID_PATTERN.test(id) ? id : null
+  return subjectUser(envelope.key)
+}
+
+/**
+ * A PAYLOAD field holding a `user:<id>` subject rather than a bare uuid.
+ *
+ * `community.vote.cast` is why this exists and it is a trap worth naming: the payload's owner
+ * field is called `voter`, not `userId`, and it holds `user:<uuid>` because community's whole
+ * membership model is subject-keyed (`community/src/server.ts:875` passes `caller.subject`). So
+ * `userFromPayload` finds nothing, and a reader that expected a bare uuid under `voter` would
+ * also find nothing — a vote receipt in nobody's feed, which is the one thing the topic exists
+ * to deliver.
+ */
+function userFromSubjectField(field: string): (envelope: EventEnvelope) => string | null {
+  return (envelope) => subjectUser(payloadOf(envelope)[field])
+}
+
+/**
+ * How a session ended, as the user should read it.
+ *
+ * The four keys are every value identity actually passes — `identity/src/server.ts:993` (password
+ * changed), `:1065` (password reset), `:1128` (signed out everywhere) and `:1137`/
+ * `sessions.ts:389` (signed out). The fifth case has no constant: `server.ts:892` burns a refresh
+ * family when a stolen token is replayed, and whatever reason it carries must fall through to the
+ * alarming sentence rather than to a reassuring one.
+ *
+ * **The fallback is deliberately the alarming one.** `notify` fires a critical notification for
+ * every reason except `signed_out`, including one it has never seen, on the grounds that an
+ * unrecognised reason is exactly when a user should look. The timeline says the same thing, or a
+ * user gets a critical alert and finds a feed entry that reads as routine.
+ */
+const REVOCATION_SUMMARIES: Readonly<Record<string, string>> = Object.freeze({
+  signed_out: 'You signed out.',
+  signed_out_everywhere: 'You signed out everywhere, and this session ended.',
+  password_changed: 'Your password was changed, so this session was signed out.',
+  password_reset: 'Your password was reset, so this session was signed out.',
+})
+
+const UNKNOWN_REVOCATION =
+  'This session was ended for security. If that was not you, change your password now.'
+
+function revocationReason(envelope: EventEnvelope): string {
+  const value = payloadOf(envelope)['reason']
+  return typeof value === 'string' ? value : ''
 }
 
 /* ------------------------------------------------------------------ the table */
@@ -158,6 +219,29 @@ export const CLASSIFIERS = Object.freeze({
       return device ? `Signed in on ${device}${ip ? ` from ${ip}` : ''}.` : 'Signed in.'
     },
   },
+  /**
+   * The other half of `identity.session.created`, and the one topic here that is two facts.
+   *
+   * A plain sign-out and a security revocation are not the same event to somebody reading their
+   * own timeline, so they do not get the same `type` — see the note on `TopicClassifier.type`.
+   * The category is `security` for both, and that is deliberate rather than lazy: sign-IN is
+   * already `security`, so filing sign-OUT anywhere else would mean the two halves of one session
+   * cannot be read together under one filter, and a user looking for "what happened to my
+   * sessions" would find only half of it.
+   */
+  'identity.session.revoked': {
+    category: 'security',
+    type: (event) =>
+      revocationReason(event) === 'signed_out' ? 'security.signed_out' : 'security.session_revoked',
+    visibility: 'user',
+    // userFromPayload, NOT userFromKey. The registry keys this by SESSION id
+    // (contracts/packages/events/src/index.ts:267, identity/src/sessions.ts:394) and a session id
+    // IS a uuid, so userFromKey would return it as the "user" and every revocation would land in
+    // nobody's feed — silently, exactly as identity.session.created did. The payload names the
+    // user (`identity/src/sessions.ts:397`).
+    userId: userFromPayload,
+    summary: (event) => REVOCATION_SUMMARIES[revocationReason(event)] ?? UNKNOWN_REVOCATION,
+  },
   'identity.device.added': {
     category: 'security',
     type: 'security.device_added',
@@ -179,6 +263,30 @@ export const CLASSIFIERS = Object.freeze({
       payloadOf(event)['wasLast'] === true
         ? 'Your last two-factor method was removed. Your account is no longer protected by a second factor.'
         : 'A two-factor method was removed.',
+  },
+  /**
+   * The mirror of `identity.mfa.removed`, and it is the one an attacker triggers.
+   *
+   * `removed` is news because it can leave an account on its password alone; `added` is news for
+   * the opposite reason — a factor an attacker enrols is how they keep an account after the owner
+   * resets the password. Same category, same visibility, and `replacedPrevious` is the field that
+   * decides which sentence is true, because re-enrolling an authenticator on a new phone and
+   * adding a second one are different things to the person reading it.
+   */
+  'identity.mfa.added': {
+    category: 'security',
+    type: 'security.mfa_added',
+    visibility: 'user',
+    // Keyed by user_id, as the registry says and as the emit does (`identity/src/mfa.ts:566`).
+    // The same reader `identity.mfa.removed` uses.
+    userId: userFromKey,
+    summary: (event) => {
+      const kind = text(event, 'kind', 32)
+      const named = kind ? ` (${kind})` : ''
+      return payloadOf(event)['replacedPrevious'] === true
+        ? `A two-factor method${named} was replaced with a new one.`
+        : `A two-factor method${named} was added to your account.`
+    },
   },
   'ledger.entry.posted': {
     // A journal entry is a movement of value. `transfer` is the honest category: the entry itself
@@ -207,6 +315,34 @@ export const CLASSIFIERS = Object.freeze({
     summary: (event) => {
       const drift = amount(event, 'drift')
       return drift ? `Reconciliation completed with drift ${drift}.` : 'Reconciliation completed.'
+    },
+  },
+  /**
+   * `wallet`, not `account` and not `ownership`.
+   *
+   * The sixteen have a `wallet` category and this is the first topic that puts a user-visible
+   * record in it — until now only `ledger.reconciliation.completed` filed there, and that one is
+   * internal, so the filter existed with nothing behind it. A wallet being registered is the
+   * canonical `wallet` fact.
+   *
+   * `origin` decides the sentence. A custodial wallet is something the platform made for you; an
+   * external one is a wallet you already had and linked. Reading them as the same event would
+   * hide the case that actually matters — a link the user did not make.
+   */
+  'wallet.wallet.created': {
+    category: 'wallet',
+    type: 'wallet.created',
+    visibility: 'user',
+    // Keyed by WALLET id (`wallet/src/wallets.ts:216`, registry keyedBy `wallet_id`); the payload
+    // names the user (`wallet/src/wallets.ts:219`).
+    userId: userFromPayload,
+    summary: (event) => {
+      const chain = text(event, 'chain', 24)
+      const network = text(event, 'network', 24)
+      const where = chain ? ` on ${chain}${network ? ` ${network}` : ''}` : ''
+      return payloadOf(event)['origin'] === 'external'
+        ? `An external wallet was linked to your account${where}.`
+        : `A wallet was created for you${where}.`
     },
   },
   'wallet.deposit.confirmed': {
@@ -541,6 +677,58 @@ export const CLASSIFIERS = Object.freeze({
       return title ? `Proposal "${title}" passed its timelock and executed.` : 'A proposal executed.'
     },
   },
+  /* ── the two other halves of the governance lifecycle ──────────────────────────────────────
+   * Both are `governance` rather than `community`, and that is a decision about what a filter
+   * means: `community.proposal.executed` above is already `governance`, so splitting the same
+   * proposal's lifecycle across two categories would mean a user filtering `governance` sees the
+   * spend but not the vote that authorised it. `notify` files `proposal.opened` under `community`
+   * and `vote.cast` under `governance`, which is right THERE — notify's categories are
+   * preference switches, and "tell me about my communities" is a different subscription from
+   * "tell me about my votes". A timeline is a narrative, and the narrative is one proposal.
+   * ------------------------------------------------------------------------------------------ */
+  'community.proposal.opened': {
+    category: 'governance',
+    type: 'governance.proposal_opened',
+    // NOBODY'S FEED, and this is the one classification here that refuses to name an owner.
+    //
+    // The emit (`community/src/jobs.ts:220-227`) is a scheduled transition run by
+    // `actor: 'service:community'`, and its payload is `{ proposalId, communityId }` — there is no
+    // user on it at all, not even the author, because nobody performed the act. Fanning it out to
+    // every member is `notify`'s job and notify does it (`membersOf(event, 'open')`); notify has a
+    // recipient list, and a classifier here may not read a database, so activity cannot turn one
+    // event into N member records. Guessing an owner from `communityId` would file a
+    // community-wide fact in one person's feed.
+    //
+    // Same shape as `aetherholm.season.opened` and `emberkin.season.started`: a world event with
+    // no individual subject is internal, and the personal records come from the topics that do
+    // have one — `community.vote.cast` below.
+    visibility: 'internal',
+    userId: () => null,
+    summary: (event) => {
+      const title = text(event, 'title', 64)
+      return title
+        ? `Voting opened on "${title}".`
+        : 'A proposal left discussion and its voting window is open.'
+    },
+  },
+  'community.vote.cast': {
+    category: 'governance',
+    type: 'governance.vote_cast',
+    visibility: 'user',
+    // The receipt, and it must reach the voter or the topic does nothing. Keyed by PROPOSAL id,
+    // and the owner field is `voter` holding `user:<uuid>` — see `userFromSubjectField`.
+    userId: userFromSubjectField('voter'),
+    summary: (event) => {
+      const choice = text(event, 'choice', 16)
+      const counted = payloadOf(event)['subjectsCounted']
+      // `subjectsCounted` is 1 for a vote cast for oneself and more when delegations rode along.
+      // Saying so is the difference between a receipt and a reassurance: a delegate who expected
+      // to carry nine delegators and sees "1" has found a problem worth reporting.
+      const delegated =
+        typeof counted === 'number' && counted > 1 ? `, counted for ${counted} members` : ''
+      return choice ? `Your vote (${choice}) was recorded${delegated}.` : `Your vote was recorded${delegated}.`
+    },
+  },
 } as const satisfies Readonly<Record<TopicName, TopicClassifier>>)
 
 /* ------------------------------------------------------------------ classification */
@@ -584,11 +772,11 @@ export function classify(envelope: EventEnvelope, known: boolean): Classified {
     }
   }
 
-  const classifier = CLASSIFIERS[envelope.topic]
+  const classifier: TopicClassifier = CLASSIFIERS[envelope.topic]
   const userId = classifier.userId(envelope)
   return {
     category: classifier.category,
-    type: classifier.type,
+    type: typeof classifier.type === 'function' ? classifier.type(envelope) : classifier.type,
     userId,
     subjectUrn,
     summary: classifier.summary(envelope),
