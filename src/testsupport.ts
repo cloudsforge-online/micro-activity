@@ -133,10 +133,18 @@ export function delivery(options: DeliveryOptions): Delivery {
  * Hand-built rather than through `makeEvent`, which by design refuses an unregistered topic — the
  * situation being reproduced is a producer that is *ahead* of this consumer's copy of
  * contracts-events, which is a normal consequence of deploying twenty-two services separately.
+ *
+ * `overrides` exists to build the envelope a producer really sent when the producer was WRONG —
+ * an actor spelling the contract does not admit, a missing `version`. Being hand-built is what
+ * makes that possible: `makeEvent` would not let a test express an illegal envelope, and an
+ * illegal envelope arriving on an unregistered topic is precisely the case that used to be waved
+ * through here. Defaults on their own still produce a contract-clean envelope, so every existing
+ * caller keeps testing the quarantine and not the refusal.
  */
 export function unknownTopicDelivery(
   topic = 'worlds.session.ended',
   payload: Record<string, unknown> = { userId: ALICE },
+  overrides: Record<string, unknown> = {},
 ): Delivery {
   const envelope = {
     id: eventId(),
@@ -148,6 +156,7 @@ export function unknownTopicDelivery(
     actor: 'system',
     correlationId: 'req-from-the-future',
     payload,
+    ...overrides,
   }
   const body = JSON.stringify(envelope)
   return { body, signature: signDelivery(body, SECRET), envelope: envelope as unknown as EventEnvelope }

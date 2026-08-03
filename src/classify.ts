@@ -26,6 +26,7 @@
 
 import {
   TOPICS,
+  parseActor,
   parseTopicName,
   type EventEnvelope,
   type ProducerService,
@@ -112,6 +113,43 @@ function userFromKey(envelope: EventEnvelope): string | null {
 function userFromPayload(envelope: EventEnvelope): string | null {
   const value = payloadOf(envelope)['userId']
   return typeof value === 'string' && UUID_PATTERN.test(value) ? value : null
+}
+
+/**
+ * The ENVELOPE ACTOR names the user, for topics whose payload names nobody at all.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **THIS READER IS DANGEROUS AND IS ONLY EVER CORRECT WITH THE EMIT SITE IN FRONT OF YOU.**
+ *
+ * The actor is *who performed the act*, and the feed record belongs to *whose news it is*. Those
+ * coincide often enough to be tempting and diverge exactly where it costs the most:
+ * `aetherholm.battle.resolved` has the ATTACKER as its actor while the record is the DEFENDER's
+ * (see that entry), and `market.listing.sold`'s offer event had the OFFERER as its actor, which is
+ * why `notify` refuses the generic helper there and reads `sellerSubject` explicitly. Reaching for
+ * this reader because a payload is thin is how "your city was raided" lands in the raider's feed.
+ *
+ * It is used by exactly three topics — `trade.bot.paused`, `devplatform.key.issued` and
+ * `devplatform.key.revoked` — and each one cites the line of its producer that proves the actor is
+ * the subject of the news rather than merely its cause. Nothing else may use it without doing the
+ * same.
+ *
+ * `parseActor` from contracts-events rather than a `startsWith('user:')`, because the actor
+ * vocabulary is the contract's and this file must not hold a second opinion about it. That is not
+ * hypothetical: `devplatform` shipped `key:<display>` and `system:identity`, two spellings the
+ * contract has never admitted (`ActorKind` is `user | service | operator | system`, and `system`
+ * takes no subject), and a local prefix test would have read both as "not a user" for the right
+ * answer by luck rather than refused them as illegal.
+ *
+ * The UUID check on top is not redundant. `parseActor` accepts any non-empty subject, so
+ * `user:alice` parses; a non-uuid subject reaching `activity_records.user_id` is a value no feed
+ * query can ever match, which is the silent-misfile failure this file exists to avoid.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ */
+function userFromActor(envelope: EventEnvelope): string | null {
+  const parsed = parseActor(envelope.actor)
+  if (!parsed.ok || parsed.value.kind !== 'user') return null
+  const id = parsed.value.id
+  return id !== null && UUID_PATTERN.test(id) ? id : null
 }
 
 /**
@@ -917,6 +955,155 @@ export const CLASSIFIERS = Object.freeze({
       const delegated =
         typeof counted === 'number' && counted > 1 ? `, counted for ${counted} members` : ''
       return choice ? `Your vote (${choice}) was recorded${delegated}.` : `Your vote was recorded${delegated}.`
+    },
+  },
+  /* ── trade's one and devplatform's two: three topics whose PAYLOADS NAME NOBODY ─────────────
+   *
+   * Registered together by micro-contracts `8889373`, and the three that made this file fail to
+   * compile. That compile error was the cheap half of the fault. The expensive half is that
+   * `classify` dereferences `CLASSIFIERS[topic]` for any topic the registry knows
+   * (`classify.ts`, the `known` branch), so an unclassified-but-registered topic is a `TypeError`
+   * inside the ingest transaction — a 500, no inbox row, and a relay that redelivers the same
+   * event for ever against a service that can never accept it. A missing classifier is not a
+   * cosmetic gap; it is a delivery loop.
+   *
+   * **All three are keyed by a uuid that is not a user** — `bot_id`, `key_id`, `key_id` — so
+   * `userFromKey` returns a real, well-formed, wrong id on every one of them. That is
+   * `identity.session.created` for the third and fourth time, and `unit.test.ts`'s key-reader rule
+   * covers all three the moment the registry names them.
+   *
+   * **And all three carry no user in the payload either**, so `userFromPayload` — the repair that
+   * worked for settlement's, wallet's and identity's — finds nothing here:
+   *
+   *   - `trade/src/bots.ts:614`, the sole `trade.bot.paused` emit, sends `{ botId }`.
+   *   - `devplatform/src/apikeys.ts:283-296`, `emitKeyIssued`, sends
+   *     `{ keyId, projectId, environment, display, scopes }`.
+   *   - `devplatform/src/apikeys.ts:368-382`, `emitKeyRevoked`, sends
+   *     `{ keyId, projectId, environment, display, lookupId, reason }`.
+   *
+   * The owner is on the ENVELOPE, in `actor`, and only reading it there gets these three into the
+   * right feed. See `userFromActor` for why that reader is quarantined to exactly these topics and
+   * what it costs when it is used anywhere else. `notify` reached the same conclusion from the
+   * same payloads for its two API-key rules, independently and first.
+   * ------------------------------------------------------------------------------------------ */
+  /**
+   * The first record in the `trading` category — a filter that has existed with nothing behind it.
+   *
+   * **One fact, not two.** A pause is a pause: `pauseBot` (`trade/src/bots.ts:610-616`) has one
+   * caller (`trade/src/server.ts:672`), one guard (`bot.status !== 'running'`) and one payload, and
+   * there is no field on the event that separates two different pieces of news. The variation that
+   * WOULD matter — an owner pausing versus trade halting a bot that breached a limit — does not
+   * exist yet, because nothing but the owner's route calls it.
+   *
+   * **The summary says the position is still open, and that sentence is the reason the entry is
+   * worth writing.** `pauseBot`'s own documentation is explicit that "pause is deliberately not a
+   * flatten": the position stays open, and a paused bot is only ever reconciled by the settlement
+   * sweep, never assessed, so its equity is a mark from whenever it last ticked against an
+   * unrealised position that may be worth anything by now. A feed entry reading "your bot stopped"
+   * and nothing more leaves the owner believing they are flat when they are not. `notify` says the
+   * same thing for the same reason (`notify/src/catalogue.ts`, the `trade.bot.paused` rule).
+   *
+   * The bot is not named in the prose. The payload carries only `botId`, a uuid, and a uuid in a
+   * sentence is noise a reader cannot act on; the id reaches `subject_urn` as a typed reference
+   * instead, which is what a frontend links from.
+   */
+  'trade.bot.paused': {
+    category: 'trading',
+    type: 'trading.bot_paused',
+    visibility: 'user',
+    // The actor is the bot's OWNER and not the caller: `bots.ts:614` writes
+    // `actor: \`user:${bot.userId}\`` off the row, so it names the owner whoever pressed the
+    // button. NOT userFromKey — the key is `bot.id` (registry `keyedBy: 'bot_id'`), a uuid, so a
+    // key reader would file every pause against a bot id dressed as a person.
+    userId: userFromActor,
+    summary: () =>
+      'Your trading bot stopped. Pausing does not close its position — that stays open until you resume or stop the bot.',
+  },
+  /**
+   * The first record in the `api` category, and the same empty-filter story as `trading`.
+   *
+   * **An API key acts as the account, with no password and no second factor**, so a key the owner
+   * did not create is what a compromise looks like from the inside. That is why this is a
+   * user-visible timeline entry and not an internal one.
+   *
+   * **One fact.** The tempting split is user-created versus machine-created (a key minting a key
+   * authenticates as `service:<display>`), and it is refused because that distinction is already
+   * carried by two other fields: such an event has no user, so `userId` is null and `classify`
+   * makes the record internal. A `type` function would be a second, weaker spelling of a
+   * difference `visibility` already states exactly — and `TopicClassifier.type` is a function only
+   * where a field of the payload separates two messages a reader must not confuse.
+   *
+   * The DISPLAY (`cfk_live_…`) is rendered and the secret never is. devplatform is careful about
+   * this at the emit — `emitKeyIssued`'s own note says the event "carries the DISPLAY, never the
+   * key" — and the display is the string an operator finds in a log line and quotes at a
+   * revocation, so it is the identifier that makes the entry actionable.
+   */
+  'devplatform.key.issued': {
+    category: 'api',
+    type: 'api.key_issued',
+    visibility: 'user',
+    // `devplatform/src/server.ts:945`, in the key-issuing route, passes `actorOf(caller)` — which
+    // is `user:<id>` for a session-holding caller (`actorOf`, `server.ts:701`).
+    // In the case this record exists for — a stolen session — that id IS the victim's, because the
+    // attacker is acting as them, so the entry lands where it can be recognised as wrong. NOT
+    // userFromKey: the key is `key.id` (registry `keyedBy: 'key_id'`), a uuid that is a credential
+    // and not a person.
+    userId: userFromActor,
+    summary: (event) => {
+      const display = text(event, 'display', 48)
+      const environment = text(event, 'environment', 24)
+      const where = environment ? ` in ${environment}` : ''
+      return display
+        ? `An API key ${display} was created on your project${where}. It can act as you without a password.`
+        : `An API key was created on your project${where}. It can act as you without a password.`
+    },
+  },
+  /**
+   * **Two facts, and the discriminator is the actor rather than the payload.**
+   *
+   * A key you revoked and a key the platform revoked out from under you are not one entry with a
+   * softer adjective, and the difference is real in the producer rather than editorial. There are
+   * two emit paths and they are reached by different events:
+   *
+   *   - `devplatform/src/server.ts:999`, the key-revocation route — the owner's own `DELETE`,
+   *     actor `actorOf(caller)`. The
+   *     news is a receipt: an integration the reader deliberately broke.
+   *   - `devplatform/src/server.ts:1575`, in the `identity.organisation.deleted` handler, which
+   *     suspends the organisation and revokes EVERY live key it holds in one transaction, actor
+   *     `service:identity`. The news is that a company's entire production integration stopped, at
+   *     whatever hour identity processed the erasure, without anybody there touching anything.
+   *
+   * A single static `type` hands a frontend one icon for both, which is the mistake
+   * `identity.session.revoked` exists in this file to avoid repeating.
+   *
+   * **The second fact reaches nobody's feed today, and that is stated rather than papered over.**
+   * The org path's actor is `service:identity`, so `userFromActor` returns null and `classify`
+   * demotes the record to internal — correct, because there genuinely is no user on the envelope
+   * and a classifier may not read a database to find one. The owner exists: `api_keys.created_by`
+   * is on the row `revokeOrgKeys` is already updating. The repair is one field on devplatform's
+   * payload, and it is filed for micro-devplatform. `notify` cannot close it either — `forUser`
+   * answers `no_recipient` for a `service:` actor and that refusal is correct — so today a mass
+   * revocation is an operator's record and nobody's notification.
+   *
+   * Both branches key off `userFromActor(event) !== null` rather than off `parseActor` again, so
+   * the type and the owner can never disagree: there is exactly one reader, and "the platform did
+   * this" means precisely "no user is attributed" rather than approximately.
+   */
+  'devplatform.key.revoked': {
+    category: 'api',
+    type: (event) =>
+      userFromActor(event) === null ? 'api.key_revoked_by_platform' : 'api.key_revoked',
+    visibility: 'user',
+    // NOT userFromKey: `apikeys.ts:371` passes `key.id` (registry `keyedBy: 'key_id'`), a uuid.
+    userId: userFromActor,
+    summary: (event) => {
+      const display = text(event, 'display', 48)
+      const named = display ? ` ${display}` : ''
+      const reason = text(event, 'reason', 64)
+      const because = reason ? ` Reason given: ${reason}.` : ''
+      return userFromActor(event) === null
+        ? `The API key${named} was revoked by CloudsForge and stopped working immediately. Anything using it is now failing.${because}`
+        : `The API key${named} was revoked and stopped working immediately. Anything using it is now failing.${because}`
     },
   },
 } as const satisfies Readonly<Record<TopicName, TopicClassifier>>)

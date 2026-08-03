@@ -21,20 +21,21 @@
  * timestamp inside the signed message so the freshness window means something, and every
  * comparison in it is timing-safe.
  *
- * ## An unknown topic is filed, never dropped
+ * ## An unknown topic is filed, never dropped — but it is still held to the envelope contract
  *
  * A consumer that meets a topic added after its copy of contracts-events was published is a
  * normal consequence of deploying twenty-two services independently. Dropping the event is the
  * one response that is definitely wrong: it is gone, and nothing records that it arrived. So the
  * envelope is quarantined as `unclassified`, with its payload kept, and it can be reclassified
  * later from data that was never thrown away.
+ *
+ * **Quarantine excuses ONE fact and no others: that this build's registry is behind.** It has
+ * never been an excuse for a malformed envelope, and for a while it was — see `parseDelivery`.
  */
 
 import {
   DELIVERY_TOLERANCE_MS,
-  isRegisteredTopic,
-  isValidTopicName,
-  validateEnvelope,
+  classifyEnvelope,
   verifyDelivery,
   type DeliveryFailure,
   type EventEnvelope,
@@ -102,14 +103,43 @@ export interface ParsedDelivery {
 /**
  * Parse a delivered body into an envelope.
  *
- * For a registered topic this is `validateEnvelope` from contracts-events and nothing else — the
- * envelope contract is owned there and is never restated here.
+ * `classifyEnvelope` from contracts-events, and nothing else. The envelope contract is owned there
+ * and is never restated here — that is the whole of this function now, and it used not to be.
  *
- * For an unregistered one, `validateEnvelope` would reject the whole event over the topic alone,
- * which is exactly the drop this service must not do. The checks below are **not** a second copy
- * of that contract: they are the minimum a quarantine row needs — an id to dedupe on, a key, a
- * time to order by, a producer to attribute to, and a correlation id so the investigation that
- * eventually looks at it can get back to the request that caused it.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **QUARANTINE-WITHOUT-VALIDATION WAS A DEFECT, AND IT WAS THIS SERVICE'S.**
+ *
+ * This function used to hand-roll a shorter checklist for an unregistered topic — id, key,
+ * occurredAt, producer, correlationId, payload — on the stated grounds that it was "the minimum a
+ * quarantine row needs". The reasoning was sound about rows and wrong about events. It omitted
+ * `actor` and `version` entirely. So an unregistered topic got a **free pass on envelope
+ * correctness**, and the pass was silent: the row landed, `unclassified`, looking exactly like a
+ * consumer that is merely behind.
+ *
+ * That is not hypothetical. `devplatform` shipped two illegal actors — `actorOf` spelled an
+ * API-key caller `key:<display>`, and the organisation-erasure path passed `system:identity`,
+ * neither of which is an `ActorKind` (`system` is the one kind that takes no subject at all). Every
+ * envelope on both paths was one the contract refuses. Nothing in the estate said so, because
+ * `devplatform.key.revoked` was unregistered here and this function waved it through. The day
+ * `micro-contracts` `8889373` registered three topics in one commit, both those paths would have
+ * started being refused at once — **by a commit that touched no producer at all.**
+ *
+ * One check is still out of reach here and is named rather than implied: for an unregistered topic
+ * there is no `TopicSpec`, so nothing can say whether the producer owns the namespace it published
+ * under. That check arrives with the registration, and only with it.
+ *
+ * The excusal quarantine is for is exactly one fact: *this build's registry is behind its
+ * producers*. A malformed envelope is a different fact with a different remedy — a producer bug, to
+ * be fixed today — and `classifyEnvelope` exists precisely so the two are not collapsed. So an
+ * unregistered topic is now held to every rule a registered one is held to, and only the missing
+ * registration is forgiven. A producer whose envelope is illegal learns on its first delivery
+ * instead of on somebody else's release day.
+ *
+ * **This refuses events that were previously stored, and that is the intended trade.** A 400 is not
+ * a silent drop: the relay retries, the failure is counted, and it names every defect at once. The
+ * loss quarantine protects against is *nobody ever knowing the event existed*; a producer being
+ * told its envelope is illegal is the opposite of that.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 export function parseDelivery(rawBody: string): ParsedDelivery {
   let parsed: unknown
@@ -118,33 +148,19 @@ export function parseDelivery(rawBody: string): ParsedDelivery {
   } catch (err) {
     throw new MalformedEventError([`not JSON (${err instanceof Error ? err.message : String(err)})`])
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new MalformedEventError(['expected a JSON object'])
-  }
-  const record = parsed as Record<string, unknown>
-  const topic = record['topic']
 
-  if (typeof topic === 'string' && isValidTopicName(topic) && !isRegisteredTopic(topic)) {
-    const errors: string[] = []
-    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-    if (typeof record['id'] !== 'string' || !uuid.test(record['id'])) errors.push('id: expected a UUID')
-    if (typeof record['key'] !== 'string' || record['key'] === '') errors.push('key: missing')
-    const occurredAt = record['occurredAt']
-    if (typeof occurredAt !== 'string' || Number.isNaN(Date.parse(occurredAt))) {
-      errors.push('occurredAt: expected an ISO-8601 instant')
-    }
-    if (typeof record['producer'] !== 'string' || record['producer'] === '') errors.push('producer: missing')
-    if (typeof record['correlationId'] !== 'string' || record['correlationId'] === '') {
-      errors.push('correlationId: missing; a cross-service investigation stops here')
-    }
-    if (!('payload' in record)) errors.push('payload: missing')
-    if (errors.length > 0) throw new MalformedEventError(errors)
-    return { envelope: record as unknown as EventEnvelope, known: false }
+  const verdict = classifyEnvelope(parsed)
+  if (verdict.ok) return { envelope: verdict.value, known: true }
+  if (verdict.reason === 'unregistered_topic') {
+    // The one excusal. `defects` is empty by construction on this branch — the envelope is
+    // contract-clean and the only thing wrong with it is that this build has never heard of the
+    // topic. Quarantine it, keep the payload, and let a later release reclassify the row.
+    return { envelope: parsed as EventEnvelope, known: false }
   }
-
-  const validated = validateEnvelope(parsed)
-  if (!validated.ok) throw new MalformedEventError(validated.errors)
-  return { envelope: validated.value, known: true }
+  // Every other defect, including on an unregistered topic. `verdict.defects` deliberately omits
+  // the "not in this registry" message: being behind a producer is never this service's caller's
+  // fault, and reporting it would send a producer to fix a release it does not own.
+  throw new MalformedEventError(verdict.defects)
 }
 
 export type IngestOutcome =

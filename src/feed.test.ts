@@ -12,6 +12,7 @@
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import type postgres from 'postgres'
+import type { Actor } from '@cloudsforge/contracts-events'
 import { ingest, parseDelivery } from './ingest.ts'
 import { listAllRecords, listFeed } from './records.ts'
 import {
@@ -207,6 +208,104 @@ test('settlement\'s three, through the real ingest path, land where they belong'
     operator.records.map((r) => r.type).sort(),
     ['wallet.sweep_completed', 'withdrawal.completed', 'withdrawal.failed_refunded', 'withdrawal.outbound_confirmed'],
   )
+})
+
+test('trade\'s one and devplatform\'s two, through the real ingest path, land where they belong', { skip }, async () => {
+  // The end-to-end form of the actor-attribution tests, and the one that reads as the bug would
+  // have been reported: a bot id with a feed of its own, an API key id with a feed of its own, or
+  // an account holder with no entry for a credential that can act as them. Everything goes through
+  // `parseDelivery` -> `ingest` -> `listFeed`, so a misattribution has to survive the whole pipe.
+  const deps = ingestDeps(db())
+  const BOT = '88888888-8888-4888-8888-888888888888'
+  const API_KEY = '99999999-9999-4999-8999-999999999999'
+  const ORG_KEY = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const at = (minute: number) => new Date(BASE + minute * 60_000)
+  const send = async (
+    topic: Parameters<typeof delivery>[0]['topic'],
+    key: string,
+    payload: Record<string, unknown>,
+    actor: Actor,
+    minute: number,
+  ) => {
+    await ingest(deps, parseDelivery(delivery({ topic, key, payload, actor, occurredAt: at(minute) }).body))
+  }
+
+  // ── The producers' REAL payloads, which name nobody ────────────────────────────────────────
+  //
+  // **This is the shape that makes the guard able to fail, and it is the opposite lesson from the
+  // settlement test above.** There the payload had to be WIDENED to a shape the producer does not
+  // send yet, because a reader looking for an absent field returns null either way and the test
+  // could not fail. Here the producers' own payloads are already the adversarial ones: `{ botId }`
+  // and `{ keyId, projectId, … }` name no user at all, so a classifier broken to `userFromPayload`
+  // attributes nothing and Alice's feed comes back EMPTY. Broken to `userFromKey` instead, the bot
+  // id and the key id each acquire a feed — which the two assertions below name as the symptom.
+  await send('trade.bot.paused', BOT, { botId: BOT }, `user:${ALICE}`, 1)
+  await send(
+    'devplatform.key.issued',
+    API_KEY,
+    { keyId: API_KEY, projectId: 'p-1', environment: 'live', display: 'cfk_live_abcd1234', scopes: [] },
+    `user:${ALICE}`,
+    2,
+  )
+  await send(
+    'devplatform.key.revoked',
+    API_KEY,
+    { keyId: API_KEY, projectId: 'p-1', environment: 'live', display: 'cfk_live_abcd1234', reason: 'rotating' },
+    `user:${ALICE}`,
+    3,
+  )
+  // The organisation-erasure path (devplatform/src/server.ts:1575): every live key revoked at once,
+  // as `service:identity`. No user is on that envelope, so the record is the operator's and nobody
+  // is notified — the live gap, recorded here as a fact rather than as a hope.
+  await send(
+    'devplatform.key.revoked',
+    ORG_KEY,
+    { keyId: ORG_KEY, projectId: 'p-1', display: 'cfk_live_zzzz9999', reason: 'organisation deleted' },
+    'service:identity',
+    4,
+  )
+  // And one whose payload names a BYSTANDER while the actor is Alice. Nothing sends this today; it
+  // is here so that a future `userFromPayload` reader cannot look correct again the day a producer
+  // widens its payload. The actor wins, or this line puts Bob in the story.
+  await send('trade.bot.paused', BOT, { botId: BOT, userId: BOB }, `user:${ALICE}`, 5)
+
+  const alice = await listFeed(db(), { userId: ALICE, limit: 10, includeInternal: false })
+  assert.deepEqual(alice.records.map((r) => r.type), [
+    'trading.bot_paused',
+    'api.key_revoked',
+    'api.key_issued',
+    'trading.bot_paused',
+  ])
+
+  // **The misattributions, stated as symptoms.** All four events are keyed by a uuid that is not a
+  // person: a bot id and two API key ids.
+  assert.deepEqual(
+    (await listFeed(db(), { userId: BOT, limit: 10, includeInternal: true })).records,
+    [],
+    'a bot id must not have a feed',
+  )
+  assert.deepEqual(
+    (await listFeed(db(), { userId: API_KEY, limit: 10, includeInternal: true })).records,
+    [],
+    'an API key id must not have a feed',
+  )
+  assert.deepEqual(
+    (await listFeed(db(), { userId: BOB, limit: 10, includeInternal: true })).records,
+    [],
+    'a bystander named in a payload is not the actor and gets nothing',
+  )
+
+  // Nothing was dropped to achieve that: the mass revocation IS stored, as the operator's record,
+  // under the type that says the platform did it rather than its owner.
+  const operator = await listAllRecords(db(), { limit: 10, category: 'api' })
+  assert.deepEqual(operator.records.map((r) => r.type).sort(), [
+    'api.key_issued',
+    'api.key_revoked',
+    'api.key_revoked_by_platform',
+  ])
+  const massRevocation = operator.records.find((r) => r.type === 'api.key_revoked_by_platform')
+  assert.equal(massRevocation?.userId, null)
+  assert.equal(massRevocation?.visibility, 'internal')
 })
 
 test('the feed filters by category and by product', { skip }, async () => {

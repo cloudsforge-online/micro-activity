@@ -268,6 +268,30 @@ test('a malformed envelope is 400 with every problem at once', { skip }, async (
   })
 })
 
+test('an unknown topic with an ILLEGAL ACTOR is 400, not quarantined', { skip }, async () => {
+  // This used to be a 201 and a stored row. Quarantine forgives one fact — that this build's
+  // registry is behind its producers — and it never forgave a malformed envelope; the shorter
+  // checklist it ran just failed to look. `key:<display>` is the spelling devplatform really
+  // shipped, and it was invisible for exactly as long as its topic was unregistered here.
+  await withServer({}, async (h) => {
+    const bad = unknownTopicDelivery('worlds.session.ended', { userId: ALICE }, { actor: 'key:cfk_live_abcd1234' })
+    const res = await post(h.url, await relay(), bad.body, bad.signature)
+    assert.equal(res.status, 400, 'an illegal actor must reach its producer as a producer bug')
+    const message = ((await res.json()) as { error: { message: string } }).error.message
+    assert.match(message, /actor/)
+    // And NOT "not in this registry": being behind a producer is never the caller's fault, and
+    // naming it would send devplatform to go and fix a contracts release it does not own.
+    assert.doesNotMatch(message, /not in this registry/)
+
+    // Refused, so nothing was written — and the operator's backlog is not polluted with a row
+    // that reads as "activity is behind" when the truth is "the producer is wrong".
+    const operatorFeed = await fetch(`${h.url}/feed?category=unclassified`, {
+      headers: { authorization: `Bearer ${await operator()}` },
+    })
+    assert.equal(((await operatorFeed.json()) as { records: unknown[] }).records.length, 0)
+  })
+})
+
 test('an unknown topic is accepted and quarantined, and stays out of a user feed', { skip }, async () => {
   await withServer({}, async (h) => {
     const unknown = unknownTopicDelivery()
