@@ -131,6 +131,84 @@ test('a user is never shown an internal record, and an operator is', { skip }, a
   assert.equal(quarantine.records.length, 1)
 })
 
+test('settlement\'s three, through the real ingest path, land where they belong', { skip }, async () => {
+  // The end-to-end form of the classify tests, and the one that reads as the bug would have been
+  // reported: a withdrawal id with a feed of its own, or a user with no entry for a payment that
+  // failed. Everything here goes through `parseDelivery` -> `ingest` -> `listFeed`, so a
+  // misattribution has to survive the whole pipe rather than one pure function.
+  const deps = ingestDeps(db())
+  const WITHDRAWAL = '66666666-6666-4666-8666-666666666666'
+  const SWEEP_SOURCE = '77777777-7777-4777-8777-777777777777'
+  const at = (minute: number) => new Date(BASE + minute * 60_000)
+  const send = async (
+    topic: Parameters<typeof delivery>[0]['topic'],
+    key: string,
+    payload: Record<string, unknown>,
+    minute: number,
+  ) => {
+    await ingest(deps, parseDelivery(delivery({ topic, key, payload, occurredAt: at(minute) }).body))
+  }
+
+  // The pair `confirmedEvents` emits from ONE return statement for one row — both reach activity.
+  //
+  // **`userId` is on the narrow event ON PURPOSE, and settlement does not put it there today.**
+  // This was written first with settlement's real payload — `{ withdrawalId, txHash }`, no user —
+  // and that version of the test PASSED with the classifier deliberately broken to
+  // `userFromPayload`, because a reader looking for a field that is absent returns null either way.
+  // A guard that cannot fail. The shape sent here is the one settlement may reasonably adopt
+  // tomorrow (the row has `userId` at settlement/src/outbound.ts:230, and the wide event already
+  // carries it), which is exactly the day the double-post would appear; sending it now is what
+  // makes `() => null` a tested refusal rather than a coincidence.
+  await send(
+    'settlement.outbound.confirmed',
+    WITHDRAWAL,
+    { withdrawalId: WITHDRAWAL, userId: ALICE, txHash: '0xaa' },
+    1,
+  )
+  await send(
+    'settlement.withdrawal.completed',
+    WITHDRAWAL,
+    { withdrawalId: WITHDRAWAL, userId: ALICE, amount: '25', assetCode: 'SHARD', transactionHash: '0xaa' },
+    1,
+  )
+  // A failure that names its user, as settlement's payload will once `userId: row.userId` is added.
+  await send(
+    'settlement.outbound.failed',
+    WITHDRAWAL,
+    { withdrawalId: WITHDRAWAL, userId: ALICE, reason: 'insufficient gas', refundable: true },
+    2,
+  )
+  // A treasury sweep: real, recorded, and nobody's timeline entry.
+  await send(
+    'settlement.sweep.completed',
+    SWEEP_SOURCE,
+    { sweepSourceId: SWEEP_SOURCE, chain: 'ethereum', network: 'mainnet', assetCode: 'SHARD', amount: '1000' },
+    3,
+  )
+
+  const alice = await listFeed(db(), { userId: ALICE, limit: 10, includeInternal: false })
+  // TWO entries, not three and not four: the payment that succeeded appears ONCE despite two
+  // topics carrying it, and the failure appears with the type that says the money is coming back.
+  assert.deepEqual(alice.records.map((r) => r.type), ['withdrawal.failed_refunded', 'withdrawal.completed'])
+
+  // **The misattribution, stated as the symptom.** Every one of these four events is keyed by a
+  // uuid that is not a user. If any classifier read its key, that id would now have a feed.
+  const asWithdrawal = await listFeed(db(), { userId: WITHDRAWAL, limit: 10, includeInternal: true })
+  assert.deepEqual(asWithdrawal.records, [], 'a withdrawal id must not have a feed')
+  const asSweepSource = await listFeed(db(), { userId: SWEEP_SOURCE, limit: 10, includeInternal: true })
+  assert.deepEqual(asSweepSource.records, [], 'a sweep source id must not have a feed')
+  const bob = await listFeed(db(), { userId: BOB, limit: 10, includeInternal: true })
+  assert.deepEqual(bob.records, [], 'no settlement event belongs to a bystander')
+
+  // Nothing was dropped to achieve that. All four are stored; the two with no owner are the
+  // operator's, which is where a reconciliation question gets answered.
+  const operator = await listAllRecords(db(), { limit: 10 })
+  assert.deepEqual(
+    operator.records.map((r) => r.type).sort(),
+    ['wallet.sweep_completed', 'withdrawal.completed', 'withdrawal.failed_refunded', 'withdrawal.outbound_confirmed'],
+  )
+})
+
 test('the feed filters by category and by product', { skip }, async () => {
   const deps = ingestDeps(db())
   await deposit(ALICE, 1)
