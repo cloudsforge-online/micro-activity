@@ -319,6 +319,19 @@ export const CLASSIFIERS = Object.freeze({
         : 'A ledger entry was posted against your account.'
     },
   },
+  /**
+   * **DEAD CODE TODAY: nobody emits this.** Checked while adding settlement's three, because a
+   * classifier for a topic no producer sends is the same defect as a producer no classifier
+   * covers, and only the first has a compile error to announce it.
+   *
+   * `micro-org`'s estate-wide check is the authority (`org/tools/estate-topic-gaps.json`,
+   * `unemitted:ledger.reconciliation.completed`) and this repository re-verified it rather than
+   * copying it: the string appears nowhere in `ledger/src`, and ledger's only emit is
+   * `ledger.entry.posted` (`ledger/src/entries.ts:427`). A reconciliation that finishes announces
+   * it to nobody, so the operator query "did last night's run complete" reads a topic that has
+   * never carried a message. Owner: micro-ledger. The classifier stays — it is correct, and it is
+   * what makes the emit land in the right place on the day it is written.
+   */
   'ledger.reconciliation.completed': {
     category: 'wallet',
     type: 'wallet.reconciliation_completed',
@@ -808,6 +821,20 @@ export const CLASSIFIERS = Object.freeze({
     userId: userFromKey,
     summary: () => 'A private key left the platform. That wallet is now self-custodied.',
   },
+  /**
+   * **DEAD CODE TODAY: nobody emits this either**, and here the producer is not silent — it is
+   * using five other names. `mint/src/tokens.ts:254-258` declares `mint.token.created`, `.paid`,
+   * `.broadcast`, `.deployed` and `.failed`; `mint.deploy.confirmed` is not among them, and none
+   * of the five is registered. So the one fact the estate agreed to send is the one name mint does
+   * not use, while five real events arrive here as `unclassified`. Owner: micro-mint
+   * (`org/tools/estate-topic-gaps.json`, `unemitted:mint.deploy.confirmed`), re-verified against
+   * `mint/src` rather than taken on trust.
+   *
+   * The other two entries that check named — `custody.key.exported` and
+   * `settlement.withdrawal.stuck` — have since been repaired by their own repositories
+   * (`custody/src/exports.ts:459`, `settlement/src/withdrawals.ts:517-547`), so those two
+   * classifiers are live. These are the two that are not.
+   */
   'mint.deploy.confirmed': {
     category: 'token',
     type: 'token.deploy_confirmed',
