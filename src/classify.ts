@@ -968,9 +968,11 @@ export const CLASSIFIERS = Object.freeze({
    * cosmetic gap; it is a delivery loop.
    *
    * **All three are keyed by a uuid that is not a user** — `bot_id`, `key_id`, `key_id` — so
-   * `userFromKey` returns a real, well-formed, wrong id on every one of them. That is
-   * `identity.session.created` for the third and fourth time, and `unit.test.ts`'s key-reader rule
-   * covers all three the moment the registry names them.
+   * `userFromKey` returns a real, well-formed, wrong id on every one of them — the
+   * `identity.session.created` misattribution again, on three more topics. `unit.test.ts`'s
+   * key-reader rule covers all three the moment the registry names them, because it is written
+   * against the registry's `keyedBy` rather than against a list somebody has to remember to
+   * extend.
    *
    * **And all three carry no user in the payload either**, so `userFromPayload` — the repair that
    * worked for settlement's, wallet's and identity's — finds nothing here:
@@ -1066,8 +1068,8 @@ export const CLASSIFIERS = Object.freeze({
    * two emit paths and they are reached by different events:
    *
    *   - `devplatform/src/server.ts:999`, the key-revocation route — the owner's own `DELETE`,
-   *     actor `actorOf(caller)`. The
-   *     news is a receipt: an integration the reader deliberately broke.
+   *     actor `actorOf(caller)`. The news is a receipt: an integration the reader deliberately
+   *     broke.
    *   - `devplatform/src/server.ts:1575`, in the `identity.organisation.deleted` handler, which
    *     suspends the organisation and revokes EVERY live key it holds in one transaction, actor
    *     `service:identity`. The news is that a company's entire production integration stopped, at
