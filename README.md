@@ -1,5 +1,7 @@
 # `cloudsforge-activity`
 
+[![ci](https://github.com/cloudsforge-online/micro-activity/actions/workflows/ci.yml/badge.svg)](https://github.com/cloudsforge-online/micro-activity/actions/workflows/ci.yml) [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](./tsconfig.base.json) [![node](https://img.shields.io/badge/node-%3E%3D22-5FA04E?logo=nodedotjs&logoColor=white)](./package.json) [![tests](https://img.shields.io/badge/tests-real%20Postgres-4169E1?logo=postgresql&logoColor=white)](./.github/workflows/ci.yml)
+
 The estate's **canonical activity record**. It subscribes to every registered domain topic and
 writes one immutable row per user-visible fact, so that "what happened to my account" is a single
 ordered narrative rather than eight services each holding a fragment of it.
@@ -272,5 +274,5 @@ failure mode (18-build-status §3.3) — CI supplies the DSN so it does not happ
 
 ## Provenance
 
-The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
-human direction and review.
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, assets
+generated with **FLUX 2 Pro**, under human direction and review.
