@@ -178,6 +178,20 @@ function revocationReason(envelope: EventEnvelope): string {
   return typeof value === 'string' ? value : ''
 }
 
+/**
+ * Whether a failed withdrawal's money is coming back.
+ *
+ * `=== true` and not a truthiness test, and not a default of `true`, because this reader must
+ * agree with the consumer that actually moves the money: `wallet/src/server.ts:873` writes
+ * `refundable: payload['refundable'] === true` for the stated reason that refunding a payment
+ * which really landed pays the user twice. A timeline that said "the money is on its way back"
+ * where wallet held the funds and paged an operator would be a feed entry contradicting the
+ * balance the user is looking at on the same screen.
+ */
+function isRefundable(envelope: EventEnvelope): boolean {
+  return payloadOf(envelope)['refundable'] === true
+}
+
 /* ------------------------------------------------------------------ the table */
 
 /**
@@ -388,6 +402,155 @@ export const CLASSIFIERS = Object.freeze({
     visibility: 'user',
     userId: userFromPayload,
     summary: () => 'A withdrawal has not confirmed within its deadline and is being investigated.',
+  },
+  /* ── settlement's three newly registered topics, and why only ONE of them names a user ───────
+   *
+   * All three are keyed by something that is not a user, and all three would have been misfiled by
+   * the obvious reader. A withdrawal id is a `uuid` (`wallet/src/migrations.ts:364-365`) and a
+   * sweep source id is a `uuid` too, so `userFromKey` does not return null on any of them — it
+   * returns a real, well-formed, wrong id, and a wrong uuid queries exactly as cleanly as a right
+   * one. That is `identity.session.created` twice over, which is the one mistake this file has
+   * already made in production.
+   *
+   * `userFromPayload` is not automatically the repair either. `confirmedEvents`
+   * (`settlement/src/withdrawals.ts:436-448`) and `failedEvents` (`:475-486`) build DELIBERATELY
+   * NARROW payloads — `{ withdrawalId, txHash, confirmedAt }` and
+   * `{ withdrawalId, reason, refundable }` — and neither carries `userId`. So for these two the
+   * honest answer today is "no user is available", and the interesting question is what each of
+   * them should do about it. They answer differently, and the difference is the whole point.
+   * ------------------------------------------------------------------------------------------ */
+  /**
+   * **Nobody's feed, on purpose — because the user already has this entry.**
+   *
+   * This is not a case of "no user could be found and so we gave up". `confirmedEvents`
+   * (`settlement/src/withdrawals.ts:436-462`) returns BOTH `settlement.outbound.confirmed` and
+   * `settlement.withdrawal.completed` from a single `return [...]`, behind a single guard
+   * (`row.purpose !== 'withdrawal' || !row.sourceRef`), for the same row. They are not two facts
+   * that usually coincide; they are one fact emitted twice by one statement, and neither can occur
+   * without the other. `settlement.withdrawal.completed` is classified sixteen lines above as
+   * `withdrawal.completed`, `user`-visible, owner read off its payload's `userId` — which that
+   * payload does carry (`withdrawals.ts:456`).
+   *
+   * Activity subscribes to every topic (AD-11), so it receives both. Attributing this one to a
+   * user would therefore put "your withdrawal was sent" in that user's timeline TWICE for one
+   * payment — which reads to the person holding the phone as two withdrawals, and is a worse feed
+   * than a missing entry because it is a plausible one. wallet's subscription is the reason the
+   * narrow topic exists at all (`wallet/src/settlement.ts:167`, branched on at
+   * `wallet/src/server.ts:859` to release the reservation); the feed is not its audience.
+   *
+   * `() => null` rather than `userFromPayload`, and that choice is load-bearing rather than
+   * decorative. `userFromPayload` returns null today too, so both spellings behave identically —
+   * but the day settlement widens this payload (an entirely reasonable thing for it to do; the row
+   * has `userId` right there at `outbound.ts:230`), `userFromPayload` would SILENTLY start
+   * double-posting every completed withdrawal into a real feed, with no diff in this repository to
+   * blame. A refusal has to be spelled as a refusal or it is only a coincidence.
+   */
+  'settlement.outbound.confirmed': {
+    category: 'withdrawal',
+    type: 'withdrawal.outbound_confirmed',
+    // Internal, and `classify` would force it there anyway once `userId` is null. Both are stated:
+    // the declared visibility says what this record IS, the guard says what it can never become.
+    visibility: 'internal',
+    userId: () => null,
+    summary: () =>
+      "A withdrawal's transaction reached its confirmation depth and the reservation held against it was released.",
+  },
+  /**
+   * The only report a failed withdrawal has, and the one that is two facts.
+   *
+   * **Two facts.** `refundable` decides which of two materially different things happened, and
+   * `wallet/src/withdrawals.ts:592-600` is where the difference is real rather than editorial:
+   * `refundable === true` transitions the withdrawal to `failed` and then calls `refundWithdrawal`,
+   * releasing the reservation back into the user's spendable balance; anything else transitions it
+   * to **`stuck`** and returns — the funds stay held while an operator establishes whether the
+   * payment left the platform. "Your money is coming back" and "your money is still held and
+   * somebody is looking into it" are not one entry with a softer adjective. A single static `type`
+   * would hand the frontend one icon for both, and `TopicClassifier.type` is a function precisely
+   * so that `identity.session.revoked` would not have to do that.
+   *
+   * **The user, and the gap.** This topic carries no `userId` — `failedEvents`
+   * (`settlement/src/withdrawals.ts:475-486`) emits `{ withdrawalId, reason, refundable }` and
+   * nothing else — so `userFromPayload` finds nothing and `classify` files the record as internal.
+   * That is stated rather than papered over, because unlike `.confirmed` above there is no second
+   * topic covering this fact for the user: `failedEvents` returns a one-element array, no
+   * `settlement.withdrawal.failed` exists in the registry, and the only other event in the
+   * sequence is `wallet.withdrawal.refunded` (`wallet/src/withdrawals.ts:640`), which is
+   * unregistered, fires only on the refundable branch, and so cannot cover the stuck one at all.
+   * **A failed withdrawal is currently in nobody's timeline.** A classifier may not read a
+   * database, so this repository cannot close that; the repair is one field on settlement's
+   * payload — `userId: row.userId`, which `stuckEvents` already puts on the neighbouring event
+   * (`withdrawals.ts:521`) from the same row — and it is filed for micro-settlement.
+   *
+   * `userFromPayload` rather than `() => null` is the opposite call from `.confirmed`, for the
+   * opposite reason: there the payload widening would introduce a duplicate, here it would deliver
+   * the entry that is missing. The moment settlement adds the field this record reaches its owner
+   * with no change in this file, and the test below pins BOTH states so neither can drift silently.
+   */
+  'settlement.outbound.failed': {
+    category: 'withdrawal',
+    type: (event) =>
+      isRefundable(event) ? 'withdrawal.failed_refunded' : 'withdrawal.failed_held',
+    visibility: 'user',
+    // NOT userFromKey: the key is the WITHDRAWAL id (`withdrawals.ts:480`, registry keyedBy
+    // `withdrawal_id`) and it is a uuid (`wallet/src/migrations.ts:364-365`), so userFromKey would
+    // hand back a withdrawal id as a user id — well-formed, queryable and wrong.
+    userId: userFromPayload,
+    summary: (event) =>
+      isRefundable(event)
+        ? 'Your withdrawal could not be sent, and the amount is being returned to your balance.'
+        : 'Your withdrawal could not be completed. The amount is still held while we confirm whether the payment left the platform.',
+  },
+  /**
+   * A sweep is an INTERNAL custody movement, and this is the judgement call in the three.
+   *
+   * A sweep empties a user's per-address deposit balance into the pinned treasury address
+   * (`settlement/src/sweeps.ts`). The case for showing it to the user is real and worth stating
+   * before refusing it: this is the one event in the estate that says customer funds crossed into
+   * the blast radius of the signing credential, and "money of mine moved somewhere I did not ask
+   * it to move" sounds exactly like something a person is entitled to read.
+   *
+   * It is refused on three grounds, in increasing order of how much they matter.
+   *
+   * 1. There is no user on the event. The payload (`sweeps.ts:494-507`) is
+   *    `{ outboundId, sweepSourceId, chain, network, assetCode, from, to, amount, fee, txHash,
+   *    confirmedAt }`. The owner exists but only in a table: `sweep_sources.custody_user_id`,
+   *    which settlement itself has to go and read (`sweepBindingFor`, `sweeps.ts:455-468`). A
+   *    classifier may not read a database — see the header — so a user-visible answer here would
+   *    have to be invented, and `classify` would demote it to internal regardless.
+   * 2. **Nothing about the user's position changes.** The user's claim on the platform was
+   *    credited at `wallet.deposit.confirmed`, which is already in their feed as
+   *    `deposit.confirmed`. A sweep moves platform-controlled funds between two
+   *    platform-controlled addresses; the balance, the entitlement and the ledger position are all
+   *    exactly what they were a moment before. A timeline entry whose true content is "no change
+   *    occurred" is not a disclosure, it is an alarm the reader can do nothing with — and one
+   *    phrased in terms of an address they never chose and a treasury they have no relationship
+   *    with.
+   * 3. It is somebody's news, just not the account holder's. Where a sweep genuinely matters is
+   *    reconciliation: `ledger.reconciliation.completed` compares totals with nothing telling it
+   *    which movements produced them, and this is that missing input. So it files under `wallet`
+   *    and `internal` — the same home as `wallet.reconciliation_completed` — because the two
+   *    records an operator has to read together should sit under one filter. That is the argument
+   *    that put sign-IN and sign-OUT both under `security`, applied to treasury accounting.
+   *
+   * The summary deliberately carries no amount. `row.amount` is smallest units
+   * (`settlement/src/withdrawals.ts:123`, `chains.ts:432`), the payload does not say how many
+   * decimals the asset has, and a rendered figure that is off by eighteen orders of magnitude is
+   * worse for the operator reading it than no figure at all. `assetCode` and `amount` still reach
+   * the record's own columns through `classify`, where they are typed and not prose.
+   */
+  'settlement.sweep.completed': {
+    category: 'wallet',
+    type: 'wallet.sweep_completed',
+    visibility: 'internal',
+    // The key is the SWEEP SOURCE id, a uuid — so userFromKey returns a deposit-address row id as
+    // a "user". The payload names no user either, and the one that exists is behind a query.
+    userId: () => null,
+    summary: (event) => {
+      const chain = text(event, 'chain', 24)
+      const network = text(event, 'network', 24)
+      const where = chain ? ` on ${chain}${network ? ` ${network}` : ''}` : ''
+      return `A deposit address was swept into the treasury${where}.`
+    },
   },
   /* ── aetherholm — the third Worlds title, and the first game in the registry ────────────────
    *

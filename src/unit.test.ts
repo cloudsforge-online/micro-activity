@@ -11,7 +11,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { TOPIC_NAMES, makeEvent, serialiseEvent, signDelivery, verifyDelivery } from '@cloudsforge/contracts-events'
+import { TOPICS, TOPIC_NAMES, makeEvent, serialiseEvent, signDelivery, verifyDelivery } from '@cloudsforge/contracts-events'
 import { CATEGORIES, STORED_CATEGORIES, UNCLASSIFIED, isCategory } from './categories.ts'
 import { CLASSIFIED_TOPICS, CLASSIFIERS, classify, subjectUrnFor } from './classify.ts'
 import { BadCursorError, decodeCursor, encodeCursor } from './records.ts'
@@ -260,6 +260,204 @@ test('a proposal opening belongs to no one, and a vote belongs to its voter', ()
   assert.match(cast.summary, /\(for\)/)
   // A delegate who expected to carry delegators and reads "1" has found a problem worth reporting.
   assert.match(cast.summary, /counted for 4 members/)
+})
+
+/* ------------------------------------------------------------------ settlement's three */
+
+/** A withdrawal id and a sweep source id are both `uuid` columns — which is the whole trap. */
+const WITHDRAWAL = '66666666-6666-4666-8666-666666666666'
+const SWEEP_SOURCE = '77777777-7777-4777-8777-777777777777'
+
+test('THE RULE: no classifier may return its own event KEY as the user, for any topic not keyed by one', () => {
+  // The estate-wide form of the `identity.session.created` bug, and the reason it is a loop rather
+  // than three assertions: that bug shipped because a SESSION id is a well-formed uuid, so
+  // `userFromKey` returned it, `UUID_PATTERN` was satisfied, and every sign-in was filed against a
+  // user that does not exist — silently, because a wrong uuid queries exactly as cleanly as a right
+  // one. It then happened a second time with `identity.session.revoked`. Settlement's three are all
+  // keyed by a uuid that is not a user (`withdrawal_id`, `withdrawal_id`, `sweep_source_id`), so
+  // the same reader would have misfiled all three.
+  //
+  // The registry's `keyedBy` is the authority for which topics this applies to, so a topic
+  // registered tomorrow with a non-user key is covered on the day it lands rather than when
+  // somebody remembers to extend a list here.
+  const KEY = '018f0000-0000-7000-8000-0000000000ff'
+  const checked: string[] = []
+  for (const topic of TOPIC_NAMES) {
+    if (TOPICS[topic].keyedBy === 'user_id') continue
+    checked.push(topic)
+    // An empty payload: the producer has told us nothing but the key, which is exactly the
+    // situation in which a key-reading classifier invents an owner.
+    const { envelope } = delivery({ topic, key: KEY, payload: {} })
+    const classified = classify(envelope, true)
+    assert.notEqual(
+      classified.userId,
+      KEY,
+      `${topic} is keyed by ${TOPICS[topic].keyedBy} and returned its key as the user`,
+    )
+  }
+  // The loop must actually have run. A guard that silently checked nothing would pass for ever.
+  assert.ok(checked.length > 20, `only ${checked.length} topics were checked`)
+  assert.ok(checked.includes('settlement.outbound.confirmed'))
+  assert.ok(checked.includes('settlement.outbound.failed'))
+  assert.ok(checked.includes('settlement.sweep.completed'))
+})
+
+test('one payment does not become two feed entries: outbound.confirmed is internal, withdrawal.completed is the user\'s', () => {
+  // `confirmedEvents` (settlement/src/withdrawals.ts:436-462) returns BOTH topics from one
+  // `return [...]` behind one guard, for one row. Activity subscribes to every topic, so it gets
+  // both. If the narrow one were attributed, a user would see "your withdrawal was sent" twice for
+  // one payment — which reads as two withdrawals, and is worse than a missing entry because it is
+  // a believable one.
+  const narrow = classify(
+    delivery({
+      topic: 'settlement.outbound.confirmed',
+      key: WITHDRAWAL,
+      payload: { withdrawalId: WITHDRAWAL, txHash: '0xabc', confirmedAt: '2026-08-03T00:00:00.000Z' },
+    }).envelope,
+    true,
+  )
+  assert.equal(narrow.category, 'withdrawal')
+  assert.equal(narrow.type, 'withdrawal.outbound_confirmed')
+  assert.equal(narrow.userId, null)
+  assert.equal(narrow.visibility, 'internal')
+
+  // The refusal must survive settlement widening the payload. `userFromPayload` would have started
+  // double-posting on that day with no diff in this repository to blame it on.
+  const widened = classify(
+    delivery({
+      topic: 'settlement.outbound.confirmed',
+      key: WITHDRAWAL,
+      payload: { withdrawalId: WITHDRAWAL, userId: ALICE, txHash: '0xabc' },
+    }).envelope,
+    true,
+  )
+  assert.equal(widened.userId, null)
+  assert.equal(widened.visibility, 'internal')
+
+  // And the fact IS in the user's feed — under the other half of the same emit.
+  const wide = classify(
+    delivery({
+      topic: 'settlement.withdrawal.completed',
+      key: WITHDRAWAL,
+      payload: { withdrawalId: WITHDRAWAL, userId: ALICE, amount: '25', assetCode: 'SHARD', transactionHash: '0xabc' },
+    }).envelope,
+    true,
+  )
+  assert.equal(wide.userId, ALICE)
+  assert.equal(wide.visibility, 'user')
+})
+
+test('a failed withdrawal reads as two different facts, and the reassuring one is never the fallback', () => {
+  const failed = (payload: Record<string, unknown>) =>
+    classify(delivery({ topic: 'settlement.outbound.failed', key: WITHDRAWAL, payload }).envelope, true)
+  const base = { withdrawalId: WITHDRAWAL, userId: ALICE, reason: 'insufficient gas' }
+
+  // `refundable: true` — wallet/src/withdrawals.ts:596-600 transitions to `failed` and refunds.
+  const refunded = failed({ ...base, refundable: true })
+  assert.equal(refunded.category, 'withdrawal')
+  assert.equal(refunded.type, 'withdrawal.failed_refunded')
+  assert.match(refunded.summary, /returned to your balance/)
+
+  // `refundable: false` — wallet/src/withdrawals.ts:592-594 transitions to **stuck** and holds the
+  // funds while an operator establishes whether the payment left. A different fact, not a softer
+  // adjective, so it must not share a `type` with the line above.
+  const held = failed({ ...base, refundable: false })
+  assert.equal(held.type, 'withdrawal.failed_held')
+  assert.match(held.summary, /still held/)
+  assert.notEqual(held.type, refunded.type)
+  assert.notEqual(held.summary, refunded.summary)
+
+  // The field ABSENT must read as held, never as refunded. wallet defaults the same way
+  // (`payload['refundable'] === true`, wallet/src/server.ts:873) because refunding a payment that
+  // really landed pays the user twice; a timeline promising a refund wallet did not make would
+  // contradict the balance on the same screen.
+  const silent = failed(base)
+  assert.equal(silent.type, 'withdrawal.failed_held')
+  assert.doesNotMatch(silent.summary, /returned to your balance/)
+  // And a truthy-but-not-true value is not a refund either.
+  assert.equal(failed({ ...base, refundable: 'yes' }).type, 'withdrawal.failed_held')
+})
+
+test('a failed withdrawal reaches its owner when settlement names one, and nobody when it does not', () => {
+  // settlement/src/withdrawals.ts:475-486 emits `{ withdrawalId, reason, refundable }` — no user.
+  // So today this record has no owner and `classify` makes it internal. Pinned as a FACT rather
+  // than left implicit: it is the live gap this classifier reports to micro-settlement, and if
+  // settlement adds `userId: row.userId` this assertion is what tells us the gap closed.
+  const today = classify(
+    delivery({
+      topic: 'settlement.outbound.failed',
+      key: WITHDRAWAL,
+      payload: { withdrawalId: WITHDRAWAL, reason: 'insufficient gas', refundable: true },
+    }).envelope,
+    true,
+  )
+  assert.equal(today.userId, null)
+  assert.equal(today.visibility, 'internal')
+  // Specifically NOT the withdrawal id. That is the misattribution this topic invites: the key is
+  // a uuid, so a key reader returns something that looks like an answer.
+  assert.notEqual(today.userId, WITHDRAWAL)
+
+  // And the moment settlement puts the user on the payload, the entry lands in that user's feed
+  // with no change in this file.
+  const repaired = classify(
+    delivery({
+      topic: 'settlement.outbound.failed',
+      key: WITHDRAWAL,
+      payload: { withdrawalId: WITHDRAWAL, userId: ALICE, reason: 'insufficient gas', refundable: true },
+    }).envelope,
+    true,
+  )
+  assert.equal(repaired.userId, ALICE)
+  assert.equal(repaired.visibility, 'user')
+  assert.notEqual(repaired.userId, BOB)
+})
+
+test('a sweep is an internal treasury movement and lands in no user\'s feed', () => {
+  const swept = classify(
+    delivery({
+      topic: 'settlement.sweep.completed',
+      key: SWEEP_SOURCE,
+      payload: {
+        outboundId: '018f0000-0000-7000-8000-0000000000aa',
+        sweepSourceId: SWEEP_SOURCE,
+        chain: 'ethereum',
+        network: 'mainnet',
+        assetCode: 'SHARD',
+        amount: '1000000000000000000',
+        fee: '21000',
+        txHash: '0xabc',
+      },
+    }).envelope,
+    true,
+  )
+  // `wallet`, with `wallet.reconciliation_completed`: the two records an operator reads together
+  // belong under one filter. Not `deposit` — the user's deposit was credited at
+  // `wallet.deposit.confirmed` and nothing about their position changes here.
+  assert.equal(swept.category, 'wallet')
+  assert.equal(swept.type, 'wallet.sweep_completed')
+  assert.equal(swept.userId, null)
+  assert.equal(swept.visibility, 'internal')
+  // Not the sweep source id dressed up as a person, and not the outbound id either.
+  assert.notEqual(swept.userId, SWEEP_SOURCE)
+  assert.match(swept.summary, /ethereum mainnet/)
+
+  // The amount is a smallest-units integer (settlement/src/withdrawals.ts:123) and the payload
+  // carries no decimals, so it stays in its typed column and out of the prose. A figure eighteen
+  // orders of magnitude wrong is worse than no figure.
+  assert.equal(swept.amount, '1000000000000000000')
+  assert.doesNotMatch(swept.summary, /1000000000000000000/)
+
+  // A user id smuggled onto the payload does not make a treasury movement somebody's news.
+  const withUser = classify(
+    delivery({
+      topic: 'settlement.sweep.completed',
+      key: SWEEP_SOURCE,
+      payload: { sweepSourceId: SWEEP_SOURCE, userId: ALICE, chain: 'ethereum', network: 'mainnet' },
+    }).envelope,
+    true,
+  )
+  assert.equal(withUser.userId, null)
+  assert.equal(withUser.visibility, 'internal')
 })
 
 /* ------------------------------------------------------------------ delivery parsing */
