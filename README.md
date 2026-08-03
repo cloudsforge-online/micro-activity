@@ -4,6 +4,8 @@ The estate's **canonical activity record**. It subscribes to every registered do
 writes one immutable row per user-visible fact, so that "what happened to my account" is a single
 ordered narrative rather than eight services each holding a fragment of it.
 
+Design authority: [`ecosystem/03-repository-responsibilities.md`](https://github.com/cloudsforge-online/micro-docs/blob/main/ecosystem/03-repository-responsibilities.md)
+
 **It owns no facts of its own.** Every row here is the shadow of something another service already
 committed. That is why there is no route that creates a record from a product's request — AD-11, and
 `src/server.ts:8-14` states it at the top of the file that would have carried one. A direct write is
@@ -265,3 +267,10 @@ failure mode (18-build-status §3.3) — CI supplies the DSN so it does not happ
   or a conversion. Those land better once billing, market and trade publish their own topics.
 - **No frontend topic is registered anywhere in the estate** (18-build-status §3.3l), so nothing
   user-initiated in a browser reaches this feed.
+
+---
+
+## Provenance
+
+The code in this repository was written by **Claude Opus 5** and **Claude Fable 5**, under
+human direction and review.
