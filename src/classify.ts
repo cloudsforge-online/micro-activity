@@ -102,6 +102,33 @@ function asset(envelope: EventEnvelope, field = 'assetCode'): string | null {
   return typeof value === 'string' && /^[A-Z][A-Z0-9:_-]{0,31}$/.test(value) ? value : null
 }
 
+/** EMBER's wei exponent — the same 18 `contracts-money` uses. */
+const WEI_PER_EMBER = 10n ** 18n
+
+/**
+ * A wei quantity, as EMBER, for a SUMMARY LINE ONLY.
+ *
+ * Never for the `amount` column: `classify` fills that from a payload field named `amount` or
+ * `price`, and a topic that pays in wei has neither. Writing wei there would put a number
+ * eighteen orders of magnitude out beside an asset code in a user's feed.
+ *
+ * `/^\d+$/` BEFORE `BigInt`, and that guard is the point rather than tidiness: `BigInt('')` is
+ * `0n` and `BigInt(' 7 ')` is `7n`, so an empty or padded string would render as a real payment
+ * of nothing. Anything that is not exactly a run of digits is null — "not stated" — and the
+ * caller omits the clause rather than printing a zero it did not measure.
+ *
+ * Trailing zeros are trimmed so a whole number of EMBER reads as `5` and not `5.000000000000000000`;
+ * a fractional one keeps every digit it has, because rounding money in a feed is how a feed
+ * becomes a thing people stop believing.
+ */
+function emberFromWei(value: unknown): string | null {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null
+  const wei = BigInt(value)
+  const whole = wei / WEI_PER_EMBER
+  const fraction = (wei % WEI_PER_EMBER).toString().padStart(18, '0').replace(/0+$/, '')
+  return fraction.length === 0 ? whole.toString() : `${whole.toString()}.${fraction}`
+}
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 /** The key is the user id, for the topics whose `keyedBy` in the registry says so. */
@@ -895,6 +922,37 @@ export const CLASSIFIERS = Object.freeze({
       return value && code ? `A listing sold for ${value} ${code}.` : 'A listing sold.'
     },
   },
+  /**
+   * **THE SELLER'S RECORD, AND EVERY OTHER FIELD ON THE ENVELOPE NAMES THE OFFERER.**
+   *
+   * The actor is the offerer, `offererSubject` is the offerer, and the key is the listing — so the
+   * only subject a reader could resolve without thinking is the one person for whom this is not
+   * news. `micro-market` put `sellerSubject` on the payload for exactly this reason and wrote the
+   * argument beside it (`market/src/bids.ts:453-479`): "a notification sent to the wrong person
+   * about someone else's money is worse than no notification". `notify` had declined to write a
+   * rule at all while the field was missing. This classifier reads that field and no other.
+   *
+   * A SUBJECT, not a bare uuid — a listing may be owned by a service principal
+   * (`market/src/server.ts:713` takes the seller from `subjectOf(principal)`), and
+   * `userFromSubjectField` returns null for `service:<name>` rather than filing a machine's sale
+   * in a person's feed. A null owner is made `internal` by `classify` below.
+   *
+   * `amount` and `assetCode` are picked up generically by `classify`: the payload spells them with
+   * those exact names.
+   */
+  'market.offer.made': {
+    category: 'market',
+    type: 'market.offer_made',
+    visibility: 'user',
+    userId: userFromSubjectField('sellerSubject'),
+    summary: (event) => {
+      const value = amount(event)
+      const code = asset(event)
+      return value && code
+        ? `Someone offered ${value} ${code} on your listing.`
+        : 'Someone made an offer on your listing.'
+    },
+  },
   'community.proposal.executed': {
     category: 'governance',
     type: 'governance.proposal_executed',
@@ -1106,6 +1164,161 @@ export const CLASSIFIERS = Object.freeze({
       return userFromActor(event) === null
         ? `The API key${named} was revoked by CloudsForge and stopped working immediately. Anything using it is now failing.${because}`
         : `The API key${named} was revoked and stopped working immediately. Anything using it is now failing.${because}`
+    },
+  },
+  /* ── tessera: seven topics, every one of them subject-keyed ────────────────────────────────
+   *
+   * All seven arrived in the registry together and none of them was classified, which is the
+   * failure the `satisfies` on this table exists to produce: `pnpm typecheck` went red naming
+   * eight missing keys, in CI, on the first run of it that was allowed to execute a step. They had
+   * been landing in `unclassified` quarantine — which is the designed behaviour and not a loss,
+   * so the records are all still here to be reclassified.
+   *
+   * NOT ONE of them carries a bare uuid for its owner. Tessera is subject-keyed throughout: every
+   * payload spells its party `user:<uuid>`, so `userFromPayload` finds nothing on all seven and
+   * `userFromKey` is wrong on all seven (the keys are parcels, objects, wards — never people).
+   * `userFromSubjectField` is the only correct reader here, and the field it is given is named
+   * per topic below rather than defaulted, because on three of them there are TWO subjects and
+   * only one of them is the person whose news this is.
+   *
+   * Where a topic has two parties, the choice matches `micro-notify`'s catalogue rather than
+   * being decided a second time here — the estate should not hold two opinions about whose event
+   * this is. Each entry cites the rule it follows.
+   * ------------------------------------------------------------------------------------------ */
+  'tessera.parcel.claimed': {
+    category: 'ownership',
+    type: 'ownership.parcel_claimed',
+    visibility: 'user',
+    // `ownerSubject`, the claimant. One party only: the ward is not a person.
+    userId: userFromSubjectField('ownerSubject'),
+    summary: (event) => {
+      const tier = text(event, 'tier', 32)
+      const tiles = payloadOf(event)['tiles']
+      const size = typeof tiles === 'number' && Number.isInteger(tiles) && tiles > 0 ? ` of ${tiles} tiles` : ''
+      return tier ? `You claimed a ${tier} parcel${size}.` : `You claimed ground${size}.`
+    },
+  },
+  /**
+   * The owner's warning, and the ONLY warning they get.
+   *
+   * `notify` says it plainly (`catalogue.ts:1230`): a contest is only insertable after 90 days
+   * with no visitor or edit plus 30 more, so the owner is by construction not there, and
+   * `tessera.parcel.transferred` is "the same news arriving after it is too late to matter". The
+   * payload puts `ownerSubject` before `challengerSubject` deliberately — tessera's own comment
+   * calls it "the party this event is ABOUT: whoever is losing ground" — and this reads that one.
+   */
+  'tessera.parcel.fallowed': {
+    category: 'ownership',
+    type: 'ownership.parcel_contested',
+    visibility: 'user',
+    userId: userFromSubjectField('ownerSubject'),
+    summary: () =>
+      'A parcel you hold has gone fallow and somebody has opened a claim on it. Visit or edit it to keep it.',
+  },
+  /**
+   * **THE DISPOSSESSED OWNER'S RECORD, not the new owner's**, and one record is all there is.
+   *
+   * Two subjects on the payload, and `notify` chose `fromSubject` with a reason this file has no
+   * grounds to overrule (`catalogue.ts:1188-1200`): a contest "takes ground off its owner while
+   * they are not there — the loser did nothing, is told by nothing else, and finds out by opening
+   * Tessera and looking for land that is gone". The winner opened the contest and was waiting for
+   * it.
+   *
+   * Where notify then answers `not_applicable` for `reason: 'trade'` — declining to confirm a
+   * thing two people just did on purpose — a FEED is not a notification and does not have that
+   * option: a timeline that omitted the trade would show land leaving somebody's hands with no
+   * entry saying so. So both reasons are recorded and `type` separates them, because "you were
+   * dispossessed" and "you transferred it" must not render with the same chrome.
+   *
+   * The receiving half is not representable: a classifier returns one record and may not read a
+   * database, so it cannot write the buyer's entry too. Same limit as `market.listing.sold`.
+   */
+  'tessera.parcel.transferred': {
+    category: 'ownership',
+    type: (event) =>
+      text(event, 'reason', 32) === 'contest' ? 'ownership.parcel_lost' : 'ownership.parcel_transferred',
+    visibility: 'user',
+    userId: userFromSubjectField('fromSubject'),
+    summary: (event) =>
+      text(event, 'reason', 32) === 'contest'
+        ? 'A parcel you held was taken by a resolved contest. It had been fallow for 120 days.'
+        : 'A parcel you held changed hands.',
+  },
+  'tessera.object.fired': {
+    category: 'ownership',
+    type: 'ownership.object_fired',
+    visibility: 'user',
+    // `authorSubject`. NOT the actor and NOT the key: the key is the object's own id, and tessera's
+    // emit comment says why ("an actor is not a discriminator").
+    userId: userFromSubjectField('authorSubject'),
+    summary: (event) => {
+      const category = text(event, 'category', 32)
+      // MEASURED, not asserted — tessera's word for the field, and the reason it is reported at
+      // all rather than assumed true.
+      const c2pa = payloadOf(event)['c2pa'] === true ? ' Its provenance is signed.' : ''
+      return category ? `A ${category} came out of the Kiln.${c2pa}` : `An object came out of the Kiln.${c2pa}`
+    },
+  },
+  'tessera.object.anchored': {
+    category: 'ownership',
+    type: 'ownership.object_anchored',
+    visibility: 'user',
+    // `authorSubject` again, and tessera's emit says the same thing in the other direction: the
+    // audit table reads THIS field rather than the envelope key, "the custody defect in reverse".
+    // The actor here is `system` — the anchor is written by a job, not by the author.
+    userId: userFromSubjectField('authorSubject'),
+    summary: (event) => {
+      const hash = text(event, 'transactionHash', 66)
+      return hash
+        ? `Your authorship of an object was written to Hearth, in transaction ${hash}.`
+        : 'Your authorship of an object was written to Hearth.'
+    },
+  },
+  /**
+   * NOBODY'S FEED. The payload is a ward id, a slug, an archetype, an ordinal and a tile count,
+   * and names no user at all; the actor is `system`.
+   *
+   * `aetherholm.season.opened` and `community.proposal.opened` above, exactly — and `notify`
+   * records the same refusal for the same topic in the same words ("opening a ward is inventory").
+   * `internal`, and the owner is `null` rather than guessed from the ward.
+   */
+  'tessera.ward.opened': {
+    category: 'community',
+    type: 'community.ward_opened',
+    visibility: 'internal',
+    userId: () => null,
+    summary: (event) => {
+      const name = text(event, 'name', 48)
+      const archetype = text(event, 'archetype', 32)
+      if (name && archetype) return `A new ${archetype} ward opened: ${name}.`
+      return name ? `A new ward opened: ${name}.` : 'A new ward opened.'
+    },
+  },
+  /**
+   * The parcel OWNER's record — the party being paid — and not the person who booked.
+   *
+   * `ownerSubject` is first of the pair on the payload for that reason, and `notify`'s rule reads
+   * the same field. Tessera's emit also refuses to publish the caller's figure: `priceWei` is the
+   * owner's number, "publishing `input.escrowedWei` instead would put an unverified figure on the
+   * bus".
+   *
+   * `amount` and `assetCode` on the record stay NULL, deliberately. `classify` reads `amount` or
+   * `price` and this payload has neither — it has `priceWei`, and wei is not what the `amount`
+   * column holds. Filing 5000000000000000000 under an amount a feed renders beside a code would
+   * show a user a number eighteen orders of magnitude wrong, so the price is stated in the summary
+   * in EMBER, converted here and nowhere else, or omitted entirely if it does not parse.
+   */
+  'tessera.venue.booked': {
+    category: 'market',
+    type: 'market.venue_booked',
+    visibility: 'user',
+    userId: userFromSubjectField('ownerSubject'),
+    summary: (event) => {
+      const hours = payloadOf(event)['hours']
+      const span = typeof hours === 'number' && Number.isInteger(hours) && hours > 0 ? ` for ${hours} hours` : ''
+      const price = emberFromWei(payloadOf(event)['priceWei'])
+      const paid = price === null ? '' : ` You earned ${price} EMBER.`
+      return `Your venue was booked${span}.${paid}`
     },
   },
 } as const satisfies Readonly<Record<TopicName, TopicClassifier>>)
