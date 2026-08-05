@@ -799,3 +799,191 @@ test('a cursor round-trips, and a forged one is refused rather than misread', ()
   assert.throws(() => decodeCursor('bm90LWEtY3Vyc29y'), BadCursorError)
   assert.throws(() => decodeCursor('!!!'), BadCursorError)
 })
+
+/* ------------------------------------------------------------------ the payload allowlist */
+
+/**
+ * The three keys `classify` reads for EVERY topic, on its own account rather than a classifier's.
+ *
+ * They are exempt from the "declared or not read" half of the rule below and not from the other
+ * half: a topic may decline to declare them, and a topic that declares them is stating that this
+ * is a payload which really carries them. `identity.user.registered` declaring `price` would fail.
+ */
+const GENERIC_KEYS = new Set(['amount', 'price', 'assetCode'])
+
+/** Every payload key a classifier touches, recorded by handing it a payload that watches. */
+function keysReadBy(topic: TopicName): Set<string> {
+  const read = new Set<string>()
+  const { envelope } = delivery({ topic, key: ALICE, payload: {} })
+  const watched = {
+    ...envelope,
+    payload: new Proxy(
+      {},
+      {
+        get: (_target, key) => {
+          if (typeof key === 'string') read.add(key)
+          return undefined
+        },
+        // `payloadOf` type-tests the payload and `Object.keys` is never called on it, but a Proxy
+        // that lied about its shape would make this whole test measure the Proxy.
+        ownKeys: () => [],
+      },
+    ),
+  }
+  classify(watched, true)
+  return read
+}
+
+test('THE RULE: a classifier may not read a payload key it has not declared', () => {
+  // The regression this makes impossible is the one that has no diff: a producer adds a field, the
+  // classifier starts reading it, and it is stored for ever because nobody updated a list. Driven
+  // against a recording Proxy rather than against a hand-written table, so it covers a topic
+  // registered tomorrow on the day it lands.
+  //
+  // It fails in BOTH directions, and the second is the one that protects other people's data:
+  // an over-declared key is a value kept for no reason, and a second party's identifier left in a
+  // payload is one that party's own erasure can never reach (`records.ts`, `eraseUser`).
+  let checked = 0
+  for (const topic of TOPIC_NAMES) {
+    const declared = new Set<string>(CLASSIFIERS[topic].payloadKeys)
+    const read = keysReadBy(topic)
+
+    for (const key of read) {
+      if (GENERIC_KEYS.has(key)) continue
+      assert.ok(declared.has(key), `${topic} reads payload.${key} and does not declare it`)
+    }
+    for (const key of declared) {
+      assert.ok(read.has(key), `${topic} declares payload.${key} and never reads it`)
+    }
+    checked += 1
+  }
+  assert.equal(checked, TOPIC_NAMES.length)
+  assert.ok(checked > 50, `only ${checked} topics were checked`)
+})
+
+test('THE RULE: an undeclared payload key is dropped at ingest, not stored and cleaned up later', () => {
+  // `identity.email.verification_requested` is the live case and the reason this exists: its real
+  // payload (`identity/src/emailVerification.ts:172-185`) carries a direct identifier and a
+  // single-use credential, and this service needs neither. Under the old code both were written
+  // verbatim into a column nothing ever deleted.
+  const { envelope } = delivery({
+    topic: 'identity.email.verification_requested',
+    key: ALICE,
+    payload: {
+      userId: ALICE,
+      handle: 'a-real-handle',
+      email: 'someone@example.test',
+      expiresAt: '2026-08-06T11:00:00.000Z',
+      linkable: true,
+      verifyUrl: 'https://hub.cloudsforge.online/verify?token=a-live-single-use-credential',
+    },
+  })
+  const classified = classify(envelope, true)
+
+  // The one declared key, and nothing else.
+  assert.deepEqual(Object.keys(classified.payload).sort(), ['__redacted', 'linkable'])
+  assert.equal(classified.payload['linkable'], true)
+
+  // Neither the address nor the credential survives anywhere on the record — not in the payload,
+  // and not smuggled into the summary a user's feed renders.
+  const stored = JSON.stringify(classified)
+  assert.ok(!stored.includes('someone@example.test'), 'the email address reached the record')
+  assert.ok(!stored.includes('a-live-single-use-credential'), 'the credential reached the record')
+  assert.ok(!stored.includes('a-real-handle'), 'the handle reached the record')
+
+  // The drop is VISIBLE. Key names are schema, not personal data, and a producer that starts
+  // sending a new field has to show up somewhere or this is the same silence in a nicer shape.
+  assert.deepEqual(classified.payload['__redacted'], ['email', 'expiresAt', 'handle', 'userId', 'verifyUrl'])
+  assert.deepEqual([...classified.redactedKeys].sort(), ['email', 'expiresAt', 'handle', 'userId', 'verifyUrl'])
+})
+
+test('a declared key is still bounded: a long string is capped and a nested document is reduced', () => {
+  // A key allowlist says which keys, and nothing at all about what a value holds. Without this,
+  // declaring one key would be a way to declare everything hanging off it.
+  const { envelope } = delivery({
+    topic: 'devplatform.key.revoked',
+    key: '99999999-9999-4999-8999-999999999999',
+    payload: {
+      display: 'x'.repeat(4_000),
+      // `INTERNAL-4821` is the value that tightened `ASSET_CODE` in `redact.ts`: an upper-case
+      // alphanumeric token with a separator is also the shape of a document or passport reference,
+      // and the first version of that pattern stored it verbatim.
+      reason: { note: 'a free-text explanation that nobody reviewed', ticket: 'INTERNAL-4821' },
+    },
+  })
+  const classified = classify(envelope, true)
+
+  const display = classified.payload['display']
+  assert.equal(typeof display, 'string')
+  assert.ok((display as string).length <= 512, `a declared string was stored at ${(display as string).length}`)
+
+  // The nested object keeps its keys and loses its prose, exactly as a quarantined payload does.
+  assert.deepEqual(classified.payload['reason'], { note: '<string:44>', ticket: '<string:13>' })
+})
+
+/* ------------------------------------------------------------------ the quarantine payload */
+
+test('THE RULE: an unknown topic keeps its shape and its identifiers, and loses its prose', () => {
+  // The quarantine is the dangerous path: there is no declaration to check against, by definition.
+  // Dropping the payload would destroy the reclassification the quarantine exists for; keeping it
+  // verbatim is the defect. So structure and identifiers survive and free text does not.
+  const { envelope } = unknownTopicDelivery('worlds.session.ended', {
+    userId: ALICE,
+    ownerSubject: `user:${BOB}`,
+    reference: 'urn:cloudsforge:worlds:session:abc-1',
+    amount: '12.5',
+    assetCode: 'EMBER',
+    txHash: '0xdeadbeef',
+    startedAt: '2026-08-05T09:00:00.000Z',
+    seats: 4,
+    ranked: true,
+    absent: null,
+    // The three the issue names, and the three that must not survive.
+    email: 'player@example.test',
+    postalAddress: '12 Wharf Road, London N1 7GR',
+    documentRef: 'passport GBR 123456789',
+    // A handle is refused for the same reason a given name is: by SHAPE it is an enum token.
+    handle: 'savvaniss',
+    nested: { note: 'free text at depth', playerId: BOB },
+  })
+  const classified = classify(envelope, false)
+  const payload = classified.payload
+
+  // Identifiers, timestamps, numbers, decimals, asset codes and hashes: kept.
+  assert.equal(payload['userId'], ALICE)
+  assert.equal(payload['ownerSubject'], `user:${BOB}`)
+  assert.equal(payload['reference'], 'urn:cloudsforge:worlds:session:abc-1')
+  assert.equal(payload['amount'], '12.5')
+  assert.equal(payload['assetCode'], 'EMBER')
+  assert.equal(payload['txHash'], '0xdeadbeef')
+  assert.equal(payload['startedAt'], '2026-08-05T09:00:00.000Z')
+  assert.equal(payload['seats'], 4)
+  assert.equal(payload['ranked'], true)
+  assert.equal(payload['absent'], null)
+
+  // Free text: the KEY survives, so a reclassifier knows the field is there. The value does not.
+  assert.equal(payload['email'], '<string:19>')
+  assert.equal(payload['postalAddress'], '<string:28>')
+  assert.equal(payload['documentRef'], '<string:22>')
+  assert.equal(payload['handle'], '<string:9>')
+  assert.deepEqual(payload['nested'], { note: '<string:18>', playerId: BOB })
+
+  // Nothing was reported as dropped, because on this path nothing was: an unknown topic has no key
+  // this build is entitled to call unexpected.
+  assert.deepEqual(classified.redactedKeys, [])
+
+  const stored = JSON.stringify(payload)
+  for (const secret of ['player@example.test', 'Wharf Road', 'passport', 'savvaniss', 'free text']) {
+    assert.ok(!stored.includes(secret), `${secret} survived the quarantine reduction`)
+  }
+})
+
+test('the quarantine keeps identifiers on purpose, because erasure has to find them', () => {
+  // A uuid is personal data, so keeping it needs its own justification: it is the only thing that
+  // lets `eraseUser` reach a quarantined row nobody ever attributed to a user. Dropping it would
+  // leave the rest of the row behind with no way to find it — moving the defect, not closing it.
+  const { envelope } = unknownTopicDelivery('worlds.session.ended', { player: ALICE })
+  const classified = classify(envelope, false)
+  assert.equal(classified.userId, null, 'an unknown payload is never guessed at for an owner')
+  assert.ok(JSON.stringify(classified.payload).includes(ALICE), 'erasure would have nothing to match')
+})

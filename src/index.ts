@@ -23,7 +23,7 @@ import { SERVICE, env } from './env.ts'
 import { SCHEMA_VERSION } from './migrations.ts'
 import { createServer, registerServiceMetrics } from './server.ts'
 import { registerHandlers, rescheduleRecurring, seedRecurring } from './jobs.ts'
-import type { Db } from './records.ts'
+import { retentionSummary, type Db } from './records.ts'
 
 // 1. Environment. Importing `./env.ts` validated it; a missing or placeholder secret has already
 //    exited with a structured line naming the variable.
@@ -122,6 +122,12 @@ const server = createServer({
       select count(*)::int as n from activity_records where category = 'unclassified'
     `
     metrics.set('activity_unclassified_total', quarantined[0]?.n ?? 0)
+
+    // Read from the schema's own view, not from anything this process remembers. If the prune job
+    // has been dead for a month this is the number that says so — see the metric's registration.
+    for (const row of await retentionSummary(db)) {
+      metrics.set('activity_retention_overdue_total', row.overdue, { class: row.retentionClass })
+    }
   },
 })
 
@@ -152,7 +158,13 @@ const runner = new JobRunner({
   },
 })
 
-registerHandlers(runner, { sql: db, logger, inboxRetentionDays: env.inboxRetentionDays })
+registerHandlers(runner, {
+  sql: db,
+  logger,
+  metrics,
+  inboxRetentionDays: env.inboxRetentionDays,
+  retentionDays: env.retentionDays,
+})
 await seedRecurring(queue)
 runner.start()
 

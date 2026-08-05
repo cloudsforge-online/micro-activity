@@ -163,6 +163,9 @@ export function parseDelivery(rawBody: string): ParsedDelivery {
   throw new MalformedEventError(verdict.defects)
 }
 
+/** Shared empty list, so the three branches that redact nothing do not each allocate one. */
+const NONE: readonly string[] = Object.freeze([])
+
 export type IngestOutcome =
   | { readonly status: 'recorded'; readonly record: ActivityRecord }
   | { readonly status: 'duplicate' }
@@ -185,7 +188,9 @@ export async function ingest(deps: IngestDeps, delivery: ParsedDelivery): Promis
       on conflict (topic, event_id) do nothing
       returning event_id
     `
-    if (claimed.length === 0) return { result: { status: 'duplicate' } as IngestOutcome }
+    if (claimed.length === 0) {
+      return { result: { status: 'duplicate' } as IngestOutcome, redactedKeys: NONE }
+    }
 
     const classified = classify(envelope, known)
 
@@ -201,9 +206,14 @@ export async function ingest(deps: IngestDeps, delivery: ParsedDelivery): Promis
      */
     if (envelope.topic === 'identity.user.deleted' && classified.userId !== null) {
       const removed = await eraseUser(tx, classified.userId)
-      return { result: { status: 'erased', removed } as IngestOutcome }
+      return { result: { status: 'erased', removed } as IngestOutcome, redactedKeys: NONE }
     }
 
+    // `classified.payload` and NOT `envelope.payload`. This line used to write the producer's whole
+    // domain payload verbatim, with no allowlist and no redaction, into a column nothing ever
+    // deleted — see the header of `redact.ts` for what that stored the week it was fixed. The
+    // redaction is part of classifying an event precisely so that this call site cannot reach round
+    // it, and neither can the next one.
     const record = await insertRecord(tx, {
       ...classified,
       occurredAt: envelope.occurredAt,
@@ -211,15 +221,12 @@ export async function ingest(deps: IngestDeps, delivery: ParsedDelivery): Promis
       sourceEventId: envelope.id,
       sourceTopic: envelope.topic,
       producer: envelope.producer,
-      payload: typeof envelope.payload === 'object' && envelope.payload !== null && !Array.isArray(envelope.payload)
-        ? (envelope.payload as Record<string, unknown>)
-        : { value: envelope.payload },
     })
     // Null means the unique constraint on `source_event_id` refused it. That can only happen if
     // the same event id arrived under a different topic, which is a producer bug — but the answer
     // is still "we already have it", not a 500 and a redelivery loop.
-    if (!record) return { result: { status: 'duplicate' } as IngestOutcome }
-    return { result: { status: 'recorded', record } as IngestOutcome }
+    if (!record) return { result: { status: 'duplicate' } as IngestOutcome, redactedKeys: NONE }
+    return { result: { status: 'recorded', record } as IngestOutcome, redactedKeys: classified.redactedKeys }
   })
 
   const result = outcome.result
@@ -246,6 +253,27 @@ export async function ingest(deps: IngestDeps, delivery: ParsedDelivery): Promis
   }
 
   deps.metrics.increment('activity_records_total', { category: result.record.category })
+
+  /**
+   * How many payload keys the allowlist refused, by topic.
+   *
+   * A counter and not a log line, and that is a decision rather than laziness: most topics send
+   * fields this build does not read, so a warning per delivery would be constant noise and would
+   * be muted within a week — and a muted signal is the same as no signal. What an operator needs
+   * is the *change*: a topic whose dropped-key rate moves is a producer that started sending
+   * something new, which is the exact event that used to be invisible. The key NAMES are on the
+   * row itself, under `__redacted`, so "which key" is one query away and never a log of values.
+   *
+   * Cardinality is bounded by the topic registry, which is a closed set of about sixty.
+   */
+  if (outcome.redactedKeys.length > 0) {
+    deps.metrics.increment(
+      'activity_payload_keys_dropped_total',
+      { topic: envelope.topic },
+      outcome.redactedKeys.length,
+    )
+  }
+
   if (result.record.category === 'unclassified') {
     // Loud, because it is a backlog rather than a normal outcome: this build is behind its
     // producers and somebody has to add a classifier.

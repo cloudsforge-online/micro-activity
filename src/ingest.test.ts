@@ -265,3 +265,126 @@ test('ingest lag is measured from when the fact happened, not from when it was r
   assert.match(rendered, /activity_ingest_lag_seconds_bucket\{producer="wallet",le="300"\} 1/)
   assert.match(rendered, /activity_ingest_lag_seconds_sum\{producer="wallet"\} 90/)
 })
+
+/* ------------------------------------------------------------------ erasure, and what it missed */
+
+test('THE RULE: erasure reaches a QUARANTINED row carrying the user, which it never used to', { skip }, async () => {
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // THE CASE THAT WAS BROKEN. `eraseUser` was `delete ... where user_id = $1`, so it erased every
+  // row this service had successfully attributed and left behind every row where attribution had
+  // FAILED — which is exactly the set nobody had ever looked at.
+  //
+  // An unknown topic is quarantined with `userId: null` on purpose (guessing an owner out of a
+  // schema this build has never seen puts one person's event in another's feed), so a quarantined
+  // row is simultaneously the row most likely to hold something personal and the row erasure could
+  // not reach. Both were true at once, and this is the test that says so.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  const deps = ingestDeps(db())
+
+  // An unknown topic carrying Alice's id in its payload, and nothing else naming her.
+  const quarantined = unknownTopicDelivery('worlds.session.ended', { player: ALICE, seats: 2 })
+  const filed = await ingest(deps, parseDelivery(quarantined.body))
+  assert.equal(filed.status, 'recorded')
+  if (filed.status !== 'recorded') return
+  assert.equal(filed.record.userId, null, 'the quarantine must still refuse to guess an owner')
+
+  // One ordinary attributed row of Alice's, and one of Bob's that must survive.
+  await ingest(deps, parseDelivery(
+    delivery({ topic: 'wallet.deposit.confirmed', key: 'w-a', payload: { userId: ALICE } }).body,
+  ))
+  await ingest(deps, parseDelivery(
+    delivery({ topic: 'wallet.deposit.confirmed', key: 'w-b', payload: { userId: BOB } }).body,
+  ))
+  assert.equal((await sql<{ n: number }[]>`select count(*)::int as n from activity_records`)[0]?.n, 3)
+
+  const outcome = await ingest(deps, parseDelivery(delivery({ topic: 'identity.user.deleted', key: ALICE }).body))
+  assert.equal(outcome.status, 'erased')
+  if (outcome.status !== 'erased') return
+  // Two: the attributed row AND the quarantined one. Under the old code this was 1.
+  assert.equal(outcome.removed, 2)
+
+  // Nothing of Alice's remains anywhere in the table — not in a column, and not inside a payload.
+  const left = await sql<{ user_id: string | null; payload: unknown }[]>`
+    select user_id, payload from activity_records
+  `
+  assert.equal(left.length, 1, "only Bob's record may be left")
+  assert.equal(left[0]?.user_id, BOB)
+  assert.ok(!JSON.stringify(left).includes(ALICE), 'the erased user survived inside a payload')
+})
+
+test('erasure reaches a row where the id is only in the subject URN', { skip }, async () => {
+  // The second hiding place. `subject_urn` is built from the ENVELOPE KEY, and every identity,
+  // custody and billing topic is keyed by the user — so a quarantined `identity.*` topic puts the
+  // user's id in that column and in no other. A payload scan alone would not find it.
+  const deps = ingestDeps(db())
+  const quarantined = unknownTopicDelivery('identity.profile.updated', { changed: 3 })
+  const filed = await ingest(deps, parseDelivery(quarantined.body))
+  assert.equal(filed.status, 'recorded')
+  if (filed.status !== 'recorded') return
+  assert.equal(filed.record.userId, null)
+  assert.ok(filed.record.subjectUrn.endsWith(`:${ALICE}`), 'the key must be the last URN segment')
+  assert.ok(!JSON.stringify(filed.record).includes('changed'))
+
+  const outcome = await ingest(deps, parseDelivery(delivery({ topic: 'identity.user.deleted', key: ALICE }).body))
+  assert.equal(outcome.status, 'erased')
+  if (outcome.status !== 'erased') return
+  assert.equal(outcome.removed, 1)
+  assert.equal((await sql<{ n: number }[]>`select count(*)::int as n from activity_records`)[0]?.n, 0)
+})
+
+test("erasure leaves an unowned operational record that names nobody", { skip }, async () => {
+  // The other side of the widened WHERE, and the reason the two new clauses are scoped to
+  // `user_id is null` AND to a match on the id itself: a reconciliation or a season opening has no
+  // owner and must not be swept up by somebody else's erasure. `user_id IS NULL` is a normal,
+  // populated state of this table, not a synonym for "orphaned personal data".
+  const deps = ingestDeps(db())
+  await ingest(deps, parseDelivery(
+    delivery({ topic: 'ledger.reconciliation.completed', key: 'run-1', payload: { drift: '0' } }).body,
+  ))
+  const outcome = await ingest(deps, parseDelivery(delivery({ topic: 'identity.user.deleted', key: ALICE }).body))
+  assert.equal(outcome.status, 'erased')
+  if (outcome.status !== 'erased') return
+  assert.equal(outcome.removed, 0)
+  assert.equal((await sql<{ n: number }[]>`select count(*)::int as n from activity_records`)[0]?.n, 1)
+})
+
+/* ------------------------------------------------------------------ the allowlist, end to end */
+
+test('THE RULE: an email address and a live credential never reach the stored payload', { skip }, async () => {
+  // The whole path, against a real column: parse, classify, redact, insert, read back. The unit
+  // test proves the classifier drops them; this proves nothing downstream puts them back.
+  const deps = ingestDeps(db())
+  const sent = delivery({
+    topic: 'identity.email.verification_requested',
+    key: ALICE,
+    payload: {
+      userId: ALICE,
+      handle: 'a-real-handle',
+      email: 'someone@example.test',
+      expiresAt: '2026-08-06T11:00:00.000Z',
+      linkable: true,
+      verifyUrl: 'https://hub.cloudsforge.online/verify?token=a-live-single-use-credential',
+    },
+  })
+  const outcome = await ingest(deps, parseDelivery(sent.body))
+  assert.equal(outcome.status, 'recorded')
+  if (outcome.status !== 'recorded') return
+
+  const stored = await sql<{ payload: Record<string, unknown>; summary: string }[]>`
+    select payload, summary from activity_records where id = ${outcome.record.id}
+  `
+  assert.deepEqual(stored[0]?.payload, {
+    linkable: true,
+    __redacted: ['email', 'expiresAt', 'handle', 'userId', 'verifyUrl'],
+  })
+  const row = JSON.stringify(stored[0])
+  assert.ok(!row.includes('someone@example.test'), 'the email address was stored')
+  assert.ok(!row.includes('a-live-single-use-credential'), 'the credential was stored')
+
+  // And the drop is counted, so a producer that starts sending a new field shows up on a dashboard
+  // rather than in nobody's awareness at all.
+  assert.match(
+    deps.metrics.render(),
+    /activity_payload_keys_dropped_total\{topic="identity\.email\.verification_requested"\} 5/,
+  )
+})

@@ -150,12 +150,151 @@ export async function getRecord(sql: Db, id: string): Promise<ActivityRecord | n
  *
  * A delete rather than an anonymisation: a feed entry stripped of its user is not anonymous, it
  * is a timestamped sequence of amounts that re-identifies trivially against any other record.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **`WHERE user_id = $1` WAS NOT ERASURE, AND THE ROWS IT LEFT BEHIND WERE THE WORST ONES.**
+ *
+ * That was the whole of this function. It erased every row this service had successfully
+ * *attributed* to the user and left behind every row where the attribution had failed — which is
+ * precisely the set of rows nobody had ever looked at. Two confirmed sources, and neither is rare:
+ *
+ *   1. **The quarantine.** `classify.ts`'s `!known` branch files an unrecognised topic with
+ *      `userId: null` deliberately — reading an owner out of a payload whose schema this build has
+ *      never seen would be a guess, and a wrong guess puts one person's event in another's feed.
+ *      That refusal is right and it stays. But the row is still keyed on the user in every way that
+ *      matters: the envelope key reaches `subject_urn`, and the payload can carry the id outright.
+ *      An unknown topic is by definition one whose contents nobody has reviewed, so a quarantined
+ *      row is simultaneously the row most likely to hold something personal and the row erasure
+ *      could not reach. Both halves of that were true at once.
+ *   2. **Classifiers that return `userId: () => null`** for an operational event — the
+ *      reconciliation, the sweep, the season opening. Those genuinely have no owner, so they are
+ *      not the problem; what they establish is that `user_id IS NULL` is a normal, populated state
+ *      of this table rather than a corner case, which is why the gap was invisible.
+ *
+ * So erasure now asks the question three ways, and the second two are deliberately scoped to
+ * `user_id is null`:
+ *
+ *   * `user_id = $1` — the rows this service knows are the user's.
+ *   * `subject_urn` ending in the id — `urn:cloudsforge:<producer>:<aggregate>:<key>` is built from
+ *     the ENVELOPE KEY (`subjectUrnFor`), and every identity, custody and billing topic is keyed by
+ *     the user. A quarantined `identity.*` topic puts the user's id in that column and nowhere else.
+ *     Matched as a `:<id>` suffix rather than with a bare `like '%id%'`, so it can only match the
+ *     key segment, which is the only segment a user id is ever in.
+ *   * the payload containing the id — `payload::text like` over the whole document, because the id
+ *     may be at any depth and under any key name, on a topic whose shape this build does not know.
+ *     A jsonb path query would have to name the path, which is the one thing an unknown topic
+ *     denies us. This is a sequential scan and it is the right trade: erasure runs once per user,
+ *     under an SLA measured in days, and a scan that is certain beats an index lookup that can miss.
+ *
+ * **Why the last two are restricted to `user_id is null`.** An attributed row belongs to the user in
+ * `user_id` and to nobody else, and it is already covered by the first clause. Letting a text match
+ * delete attributed rows would mean one person's erasure could delete another person's record for
+ * mentioning them — a defect that reads as data loss rather than as a leak, and therefore one
+ * nobody would find quickly. It cannot arise here anyway: `redact.ts` admits only the keys the
+ * classifier declared, and `THE RULE: a classifier may not read a payload key it has not declared`
+ * refuses a declaration for a key the classifier does not read, so a second party's identifier is
+ * dropped at ingest rather than left in somebody else's row. The two mechanisms are load-bearing
+ * for each other, which is why they landed together.
+ *
+ * The id is interpolated as a bound parameter and never as statement text; the caller has already
+ * checked it against `UUID_PATTERN`, so the `%` and `_` in a LIKE pattern have nothing to escape.
+ * `ilike` rather than `like`, because a uuid Postgres rendered is lower case and a uuid a producer
+ * typed into a payload need not be — and an erasure that missed on letter case would miss silently.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * ## Why this table is NOT keyed on a pseudonym the way `analytics` is — a considered no
+ *
+ * `analytics/src/pseudonym.ts` is the estate's best piece of privacy engineering and the obvious
+ * thing to copy: a per-subject salt, `subject_key = HMAC(pepper, subject || salt)`, and erasure
+ * that destroys the salt rather than the rows, after which the pseudonym is unreachable from the
+ * person. It was assessed for this table and refused, for one reason that is fatal and several
+ * that are merely expensive.
+ *
+ * **The fatal one: that construction's whole value is that the rows are ANONYMOUS afterwards, and
+ * these rows are not.** An analytics row is an event name, a timestamp and some counters — destroy
+ * the salt and what is left is genuinely about nobody. An activity row is a summary in the second
+ * person, an amount, an asset code, a subject URN and a timestamp. This function's own header
+ * already makes the argument and it is the same one: "a feed entry stripped of its user is not
+ * anonymous, it is a timestamped sequence of amounts that re-identifies trivially against any other
+ * record." A withdrawal of an exact decimal at an exact second joins against the ledger, the wallet
+ * service and the chain itself. Destroying a salt would make that row unattributable *by us* while
+ * leaving it re-identifiable by anyone holding a second dataset — pseudonymisation offered as a
+ * substitute for erasure, which is the one thing it is not.
+ *
+ * And the premise does not apply. The issue asks for a pseudonym "so erasure has something to
+ * destroy"; this table erases by DELETE, and a row that no longer exists is strictly stronger than
+ * a key that can no longer be computed. Adding a pseudonym would not give erasure something to
+ * destroy — it already has the row.
+ *
+ * What it would cost, since a refusal should be honest about what it is declining:
+ *
+ *   * **It moves the identifier rather than removing it.** `subject_urn` is built from the envelope
+ *     key and `payload` can carry the id at any depth — the two hiding places this function was
+ *     just widened to reach. Pseudonymising `user_id` and leaving those is the same defect one
+ *     column to the left, and pseudonymising all three destroys the feed's own indexes.
+ *   * **A second secret in the deploy.** The pepper's loss is the silent loss of every user's feed,
+ *     for a service whose product promise is that the feed is durable.
+ *   * **A new failure mode with no owner.** Erasure becomes "find the salt, delete the rows, delete
+ *     the salt", and the interleaving where the salt is gone and the rows are not leaves records
+ *     that nothing can ever attribute *or* erase — the exact class of orphan this widening exists
+ *     to eliminate.
+ *
+ * Reassess this the day a record is written whose content is genuinely non-identifying. Today the
+ * content IS the identification, so the answer is to delete it.
  */
 export async function eraseUser(tx: Tx, userId: string): Promise<number> {
   const rows = await tx<{ id: string }[]>`
-    delete from activity_records where user_id = ${userId} returning id
+    delete from activity_records
+     where user_id = ${userId}
+        or (
+             user_id is null
+             and (
+                   subject_urn ilike ${`%:${userId}`}
+                   or payload::text ilike ${`%${userId}%`}
+                 )
+           )
+    returning id
   `
   return rows.length
+}
+
+export interface RetentionSummary {
+  readonly retentionClass: string
+  readonly retentionDays: number
+  readonly records: number
+  readonly overdue: number
+}
+
+/**
+ * What the retention view says, for the metrics scrape.
+ *
+ * A function rather than a query inlined into `index.ts`, and the reason is coverage rather than
+ * tidiness: the composition root runs the whole service, so nothing in a suite can reach a query
+ * written there. A misspelled column in the scrape path would be a `/metrics` endpoint that 500s in
+ * production and a green build — which is the same class of defect as a retention period nothing
+ * executes. Here it is one function with a test against a real view.
+ *
+ * `overdue` is the number that matters and it is computed by the DATABASE from the rows, not by
+ * this process from what the prune job last reported. A job that has stopped running reports
+ * nothing at all, and "nothing" and "nothing to do" are the two states the gauge exists to
+ * separate.
+ */
+export async function retentionSummary(sql: Db): Promise<readonly RetentionSummary[]> {
+  const rows = await sql<
+    { retention_class: string; retention_days: number; records: string; overdue: string }[]
+  >`
+    select retention_class, retention_days, records, overdue
+      from activity_records_retention
+     order by retention_class
+  `
+  // `count(*)` is bigint, which the driver hands back as a string so a value past 2^53 is not
+  // silently rounded. These are row counts of one table, so Number is safe and the cast is stated.
+  return rows.map((row) => ({
+    retentionClass: row.retention_class,
+    retentionDays: row.retention_days,
+    records: Number(row.records),
+    overdue: Number(row.overdue),
+  }))
 }
 
 /* ------------------------------------------------------------------ the feed */

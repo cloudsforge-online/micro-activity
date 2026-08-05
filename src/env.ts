@@ -17,6 +17,7 @@
  */
 
 import { hostname } from 'node:os'
+import { RETENTION_DAYS, type RetentionClass } from './retention.ts'
 
 /**
  * The service's own name. A constant rather than a variable: it is a property of the repository,
@@ -138,6 +139,21 @@ export interface Env {
   readonly instanceId: string
   /** How long a processed inbox row is kept. Must outlive every producer's retry horizon. */
   readonly inboxRetentionDays: number
+  /**
+   * How long a RECORD is kept, by retention class, in days.
+   *
+   * The periods and the basis for each are in `src/retention.ts`; what is worth stating here is the
+   * shape of the bounds. **Each maximum is the default.** A deployment may shorten a period — a
+   * stricter jurisdiction, a tenant who asked for less — and cannot lengthen one, so the numbers in
+   * `retention.ts` are an upper bound on what any deployment of this service retains rather than a
+   * suggestion it is free to ignore. `ACTIVITY_RETENTION_FINANCIAL_DAYS=3650` is refused by name at
+   * boot, which is the difference between a policy and a comment.
+   *
+   * The one that is not merely a knob is `financial`: five years is an AML/CTF record-keeping
+   * obligation, so its floor is a year rather than a week. Shortening it below that is a decision
+   * for a lawyer and not for an environment variable.
+   */
+  readonly retentionDays: Readonly<Record<RetentionClass, number>>
 }
 
 const LEVELS = new Set(['debug', 'info', 'warn', 'error'])
@@ -166,6 +182,37 @@ export function loadEnv(source: Source = process.env, host = ''): Env {
     deliveryToleranceMs: integer(source, 'ACTIVITY_DELIVERY_TOLERANCE_MS', 300_000, 5_000, 900_000),
     instanceId: optional(source, 'INSTANCE_ID', host || 'unknown'),
     inboxRetentionDays: integer(source, 'ACTIVITY_INBOX_RETENTION_DAYS', 30, 7, 365),
+    // The maximum is the default in every one of the four — see the field's note above.
+    retentionDays: Object.freeze({
+      financial: integer(
+        source,
+        'ACTIVITY_RETENTION_FINANCIAL_DAYS',
+        RETENTION_DAYS.financial,
+        365,
+        RETENTION_DAYS.financial,
+      ),
+      personal: integer(
+        source,
+        'ACTIVITY_RETENTION_PERSONAL_DAYS',
+        RETENTION_DAYS.personal,
+        30,
+        RETENTION_DAYS.personal,
+      ),
+      operational: integer(
+        source,
+        'ACTIVITY_RETENTION_OPERATIONAL_DAYS',
+        RETENTION_DAYS.operational,
+        30,
+        RETENTION_DAYS.operational,
+      ),
+      quarantine: integer(
+        source,
+        'ACTIVITY_RETENTION_QUARANTINE_DAYS',
+        RETENTION_DAYS.quarantine,
+        7,
+        RETENTION_DAYS.quarantine,
+      ),
+    }),
   }
 }
 

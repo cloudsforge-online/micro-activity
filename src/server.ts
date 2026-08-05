@@ -107,6 +107,35 @@ export function registerServiceMetrics(metrics: Metrics): Metrics {
       kind: 'gauge',
       labels: [],
     })
+    .register({
+      // The signal that used not to exist. A producer that starts sending a field this service
+      // never declared is invisible in every other metric here; this is the one that moves.
+      name: 'activity_payload_keys_dropped_total',
+      help: 'Payload keys refused by the per-topic allowlist, by topic',
+      kind: 'counter',
+      labels: ['topic'],
+    })
+    .register({
+      name: 'activity_records_pruned_total',
+      help: 'Records deleted for reaching their retention period, by retention class',
+      kind: 'counter',
+      labels: ['class'],
+    })
+    .register({
+      /**
+       * Records past their retention period and still here.
+       *
+       * **This is the alarm for the prune job being dead**, and it is deliberately scraped from the
+       * `activity_records_retention` view rather than derived from the job's own output. A job that
+       * reports how much it deleted says nothing when it stops running; a gauge computed from the
+       * table says the same true thing whether the job ran an hour ago or never. Healthy is a flat
+       * zero — anything else is a retention period the service is currently not honouring.
+       */
+      name: 'activity_retention_overdue_total',
+      help: 'Records past their retention period that have not been deleted, by retention class',
+      kind: 'gauge',
+      labels: ['class'],
+    })
 }
 
 /* ------------------------------------------------------------------ plumbing */

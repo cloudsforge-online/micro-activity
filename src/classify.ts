@@ -33,6 +33,7 @@ import {
   type TopicName,
 } from '@cloudsforge/contracts-events'
 import { UNCLASSIFIED, type Category, type StoredCategory, type Visibility } from './categories.ts'
+import { redactPayload } from './redact.ts'
 
 /** What a record is, before it has an id and a row. */
 export interface Classified {
@@ -46,6 +47,18 @@ export interface Classified {
   readonly amount: string | null
   readonly assetCode: string | null
   readonly visibility: Visibility
+  /**
+   * The payload AS IT WILL BE STORED — already through the allowlist, never the producer's own.
+   *
+   * It is returned from here rather than read off the envelope by `ingest.ts` deliberately. The
+   * defect being closed is that a caller could write `envelope.payload` straight into the column;
+   * leaving the redaction to the caller would leave that exact shape available to the next one. A
+   * classifier is the only thing that knows what the topic declared, so the redacted payload is
+   * part of what classifying an event produces.
+   */
+  readonly payload: Record<string, unknown>
+  /** Top-level key names the allowlist refused. Names only — `ingest.ts` counts them. */
+  readonly redactedKeys: readonly string[]
 }
 
 interface TopicClassifier {
@@ -65,6 +78,26 @@ interface TopicClassifier {
   readonly visibility: Visibility
   readonly userId: (envelope: EventEnvelope) => string | null
   readonly summary: (envelope: EventEnvelope) => string
+  /**
+   * **THE PAYLOAD ALLOWLIST. Every key this classifier reads, and nothing else.**
+   *
+   * A key of the producer's payload that is not named here is never written to
+   * `activity_records.payload` — dropped at ingest, not stored and tidied up later. See the header
+   * of `redact.ts` for the policy and for the live example that arrived while it was being written
+   * (`identity.email.verification_requested` carries an email address and a single-use credential,
+   * and this service needs neither).
+   *
+   * **Required, and that is the point.** The table below is
+   * `satisfies Readonly<Record<TopicName, TopicClassifier>>`, so a topic added without a
+   * declaration fails `pnpm typecheck` rather than defaulting to "store everything" — the same
+   * mechanism that already refuses a topic with no classifier at all.
+   *
+   * Declare what is READ, not what is sent. `THE RULE: a classifier may not read a payload key it
+   * has not declared` drives every entry against a recording Proxy and fails in both directions: a
+   * key read and not declared, and a key declared and never read. Over-declaring is not harmless —
+   * a second party's identifier left in a payload is one the erasure of that party cannot reach.
+   */
+  readonly payloadKeys: readonly string[]
 }
 
 /* ------------------------------------------------------------------ payload readers */
@@ -267,13 +300,48 @@ function isRefundable(envelope: EventEnvelope): boolean {
  */
 export const CLASSIFIERS = Object.freeze({
   'identity.user.registered': {
+    payloadKeys: [],
     category: 'account',
     type: 'account.registered',
     visibility: 'user',
     userId: userFromKey,
     summary: () => 'Your account was created.',
   },
+  /**
+   * **THE TOPIC THAT PROVED THE ALLOWLIST WAS NEEDED, ON THE DAY IT WAS BEING WRITTEN.**
+   *
+   * Registered in `contracts-events` while this file was open. Its payload is
+   * `{ userId, handle, email, expiresAt, linkable, verifyUrl? }`
+   * (`identity/src/emailVerification.ts:172-185`) and two of those fields are ones this table must
+   * never hold: `email` is a direct identifier, and `verifyUrl` is a **live single-use credential**.
+   * Identity's own header accepts putting the link on the bus because `notify` has to send it and
+   * prunes what it stores; activity subscribes to every topic under AD-11, needs neither field for
+   * anything, and until `redact.ts` existed would have stored both verbatim, for ever, in a row
+   * nothing deleted. `payloadKeys` is `['linkable']` and that is the entire difference.
+   *
+   * `account`, not `security`. This is the account not yet being finished — `notify` renders it as
+   * `account.verify_email` (`notify/src/catalogue.ts:659`) — and a user reading their timeline for
+   * "what happened to my account" should find it beside the registration it belongs to.
+   *
+   * The summary never names the address and never carries the link. `linkable` is the field that
+   * decides the sentence, and it is always present by the producer's design (`emailVerification.ts`
+   * :180-183: "a consumer branches on a field that is always there"), so a deployment with no
+   * `IDENTITY_ACCOUNT_URL` reads as the different fact it is rather than as a silent nothing.
+   */
+  'identity.email.verification_requested': {
+    payloadKeys: ['linkable'],
+    category: 'account',
+    type: 'account.email_verification_requested',
+    visibility: 'user',
+    // Keyed by user_id, as the registry says and as the emit does (`emailVerification.ts:171`).
+    userId: userFromKey,
+    summary: (event) =>
+      payloadOf(event)['linkable'] === true
+        ? 'We sent a link to verify your email address. It can be used once and expires in 24 hours.'
+        : 'Your email address was asked to be verified, but no link could be built for it.',
+  },
   'identity.user.deleted': {
+    payloadKeys: [],
     category: 'account',
     type: 'account.deleted',
     visibility: 'user',
@@ -281,6 +349,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'Your account was deleted and your data erased.',
   },
   'identity.session.created': {
+    payloadKeys: ['userId', 'device', 'ipPrefix'],
     category: 'security',
     type: 'security.session_created',
     visibility: 'user',
@@ -309,6 +378,7 @@ export const CLASSIFIERS = Object.freeze({
    * sessions" would find only half of it.
    */
   'identity.session.revoked': {
+    payloadKeys: ['userId', 'reason'],
     category: 'security',
     type: (event) =>
       revocationReason(event) === 'signed_out' ? 'security.signed_out' : 'security.session_revoked',
@@ -322,6 +392,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: (event) => REVOCATION_SUMMARIES[revocationReason(event)] ?? UNKNOWN_REVOCATION,
   },
   'identity.device.added': {
+    payloadKeys: ['userId', 'device'],
     category: 'security',
     type: 'security.device_added',
     visibility: 'user',
@@ -334,6 +405,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'identity.mfa.removed': {
+    payloadKeys: ['wasLast'],
     category: 'security',
     type: 'security.mfa_removed',
     visibility: 'user',
@@ -353,6 +425,7 @@ export const CLASSIFIERS = Object.freeze({
    * adding a second one are different things to the person reading it.
    */
   'identity.mfa.added': {
+    payloadKeys: ['kind', 'replacedPrevious'],
     category: 'security',
     type: 'security.mfa_added',
     visibility: 'user',
@@ -368,6 +441,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'ledger.entry.posted': {
+    payloadKeys: ['userId', 'amount', 'assetCode', 'kind'],
     // A journal entry is a movement of value. `transfer` is the honest category: the entry itself
     // does not know whether it was a purchase, a reward or a conversion — the service that caused
     // it does, and when those services publish their own topics those entries get filed better.
@@ -398,6 +472,7 @@ export const CLASSIFIERS = Object.freeze({
    * what makes the emit land in the right place on the day it is written.
    */
   'ledger.reconciliation.completed': {
+    payloadKeys: ['drift'],
     category: 'wallet',
     type: 'wallet.reconciliation_completed',
     // Nobody's feed. It has no user and it is an operational fact, but it is still a domain event
@@ -422,6 +497,7 @@ export const CLASSIFIERS = Object.freeze({
    * hide the case that actually matters — a link the user did not make.
    */
   'wallet.wallet.created': {
+    payloadKeys: ['userId', 'chain', 'network', 'origin'],
     category: 'wallet',
     type: 'wallet.created',
     visibility: 'user',
@@ -438,6 +514,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'wallet.deposit.confirmed': {
+    payloadKeys: ['userId', 'amount', 'assetCode'],
     category: 'deposit',
     type: 'deposit.confirmed',
     visibility: 'user',
@@ -449,6 +526,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'wallet.withdrawal.requested': {
+    payloadKeys: ['userId', 'amount', 'assetCode'],
     category: 'withdrawal',
     type: 'withdrawal.requested',
     visibility: 'user',
@@ -460,6 +538,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'settlement.withdrawal.completed': {
+    payloadKeys: ['userId', 'amount', 'assetCode', 'transactionHash'],
     category: 'withdrawal',
     type: 'withdrawal.completed',
     visibility: 'user',
@@ -473,6 +552,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'settlement.withdrawal.stuck': {
+    payloadKeys: ['userId'],
     category: 'withdrawal',
     type: 'withdrawal.stuck',
     // Keyed by `chain:network`, so there may be no user on it. When the payload names one the
@@ -524,6 +604,7 @@ export const CLASSIFIERS = Object.freeze({
    * blame. A refusal has to be spelled as a refusal or it is only a coincidence.
    */
   'settlement.outbound.confirmed': {
+    payloadKeys: [],
     category: 'withdrawal',
     type: 'withdrawal.outbound_confirmed',
     // Internal, and `classify` would force it there anyway once `userId` is null. Both are stated:
@@ -565,6 +646,7 @@ export const CLASSIFIERS = Object.freeze({
    * with no change in this file, and the test below pins BOTH states so neither can drift silently.
    */
   'settlement.outbound.failed': {
+    payloadKeys: ['userId', 'refundable'],
     category: 'withdrawal',
     type: (event) =>
       isRefundable(event) ? 'withdrawal.failed_refunded' : 'withdrawal.failed_held',
@@ -617,6 +699,7 @@ export const CLASSIFIERS = Object.freeze({
    * the record's own columns through `classify`, where they are typed and not prose.
    */
   'settlement.sweep.completed': {
+    payloadKeys: ['chain', 'network', 'amount', 'assetCode'],
     category: 'wallet',
     type: 'wallet.sweep_completed',
     visibility: 'internal',
@@ -644,6 +727,7 @@ export const CLASSIFIERS = Object.freeze({
    * nobody's feed. The game-category gap stands: these file under the nearest of the sixteen.
    */
   'worlds.title.registered': {
+    payloadKeys: ['name'],
     category: 'community',
     type: 'worlds.title_registered',
     // An operator act on the platform, no player subject (`worlds/src/titles.ts:169-176`).
@@ -655,6 +739,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'worlds.reward.granted': {
+    payloadKeys: ['userId', 'amountShards'],
     category: 'reward',
     type: 'worlds.reward_granted',
     visibility: 'user',
@@ -666,6 +751,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'worlds.provision.completed': {
+    payloadKeys: ['subject'],
     category: 'ownership',
     type: 'worlds.provision_completed',
     visibility: 'user',
@@ -679,6 +765,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'Your private world is ready.',
   },
   'worlds.provision.failed': {
+    payloadKeys: ['subject'],
     category: 'billing',
     type: 'worlds.provision_failed',
     visibility: 'user',
@@ -691,6 +778,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'A world purchase could not be delivered and is being looked at.',
   },
   'emberkin.achievement.unlocked': {
+    payloadKeys: ['userId', 'name'],
     category: 'reward',
     type: 'emberkin.achievement_unlocked',
     visibility: 'user',
@@ -703,6 +791,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'emberkin.battle.resolved': {
+    payloadKeys: ['userId', 'outcome'],
     category: 'reward',
     type: 'emberkin.battle_resolved',
     visibility: 'user',
@@ -714,6 +803,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'emberkin.cosmetic.equipped': {
+    payloadKeys: ['userId'],
     category: 'ownership',
     type: 'emberkin.cosmetic_equipped',
     visibility: 'user',
@@ -721,6 +811,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'You equipped a cosmetic.',
   },
   'emberkin.save.started': {
+    payloadKeys: ['userId'],
     category: 'account',
     type: 'emberkin.save_started',
     visibility: 'user',
@@ -728,6 +819,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'You began a new campaign.',
   },
   'emberkin.season.started': {
+    payloadKeys: [],
     category: 'community',
     type: 'emberkin.season_started',
     visibility: 'internal',
@@ -735,6 +827,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'A new Emberkin season opened.',
   },
   'emberkin.reward.granted': {
+    payloadKeys: ['userId', 'amount'],
     category: 'reward',
     type: 'emberkin.reward_granted',
     visibility: 'user',
@@ -746,6 +839,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'aetherholm.season.opened': {
+    payloadKeys: ['name'],
     category: 'community',
     type: 'aetherholm.season_opened',
     // A world event, not a person's: keyed by season, no user anywhere in it.
@@ -757,6 +851,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'aetherholm.city.founded': {
+    payloadKeys: ['userId', 'name'],
     category: 'ownership',
     type: 'aetherholm.city_founded',
     visibility: 'user',
@@ -769,6 +864,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'aetherholm.building.completed': {
+    payloadKeys: ['userId', 'type'],
     category: 'reward',
     type: 'aetherholm.building_completed',
     visibility: 'user',
@@ -779,6 +875,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'aetherholm.research.completed': {
+    payloadKeys: ['userId'],
     category: 'reward',
     type: 'aetherholm.research_completed',
     visibility: 'user',
@@ -786,6 +883,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'Research completed.',
   },
   'aetherholm.skerry.provisioned': {
+    payloadKeys: ['subject'],
     category: 'ownership',
     type: 'aetherholm.skerry_provisioned',
     visibility: 'user',
@@ -798,6 +896,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'Your private skerry is ready.',
   },
   'aetherholm.battle.resolved': {
+    payloadKeys: ['defenderUserId', 'cityName', 'outcome'],
     // The nearest honest home among the sixteen is ownership: the record is about what happened
     // to YOUR city. Not `reward` — half of these are losses.
     category: 'ownership',
@@ -822,6 +921,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'aetherholm.spire.captured': {
+    payloadKeys: ['holderUserId', 'allianceName'],
     category: 'reward',
     type: 'aetherholm.spire_captured',
     visibility: 'user',
@@ -841,6 +941,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'aetherholm.season.sealed': {
+    payloadKeys: ['name'],
     category: 'community',
     type: 'aetherholm.season_sealed',
     // A world event, like season.opened: keyed by season, no single user is its subject. The
@@ -853,6 +954,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'billing.entitlement.granted': {
+    payloadKeys: ['scope'],
     category: 'billing',
     type: 'billing.entitlement_granted',
     visibility: 'user',
@@ -863,6 +965,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'billing.entitlement.revoked': {
+    payloadKeys: ['scope'],
     category: 'billing',
     type: 'billing.entitlement_revoked',
     visibility: 'user',
@@ -873,6 +976,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'custody.export.requested': {
+    payloadKeys: [],
     category: 'security',
     type: 'security.key_export_requested',
     visibility: 'user',
@@ -880,6 +984,7 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'A private key export was requested. It will not complete for 24 hours.',
   },
   'custody.key.exported': {
+    payloadKeys: [],
     category: 'security',
     type: 'security.key_exported',
     visibility: 'user',
@@ -901,6 +1006,7 @@ export const CLASSIFIERS = Object.freeze({
    * classifiers are live. These are the two that are not.
    */
   'mint.deploy.confirmed': {
+    payloadKeys: ['userId', 'name', 'contractAddress'],
     category: 'token',
     type: 'token.deploy_confirmed',
     visibility: 'user',
@@ -912,6 +1018,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'market.listing.sold': {
+    payloadKeys: ['userId', 'price', 'assetCode'],
     category: 'market',
     type: 'market.listing_sold',
     visibility: 'user',
@@ -941,6 +1048,7 @@ export const CLASSIFIERS = Object.freeze({
    * those exact names.
    */
   'market.offer.made': {
+    payloadKeys: ['sellerSubject', 'amount', 'assetCode'],
     category: 'market',
     type: 'market.offer_made',
     visibility: 'user',
@@ -954,6 +1062,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'community.proposal.executed': {
+    payloadKeys: ['userId', 'title'],
     category: 'governance',
     type: 'governance.proposal_executed',
     visibility: 'user',
@@ -973,6 +1082,7 @@ export const CLASSIFIERS = Object.freeze({
    * "tell me about my votes". A timeline is a narrative, and the narrative is one proposal.
    * ------------------------------------------------------------------------------------------ */
   'community.proposal.opened': {
+    payloadKeys: ['title'],
     category: 'governance',
     type: 'governance.proposal_opened',
     // NOBODY'S FEED, and this is the one classification here that refuses to name an owner.
@@ -998,6 +1108,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'community.vote.cast': {
+    payloadKeys: ['voter', 'choice', 'subjectsCounted'],
     category: 'governance',
     type: 'governance.vote_cast',
     visibility: 'user',
@@ -1068,6 +1179,7 @@ export const CLASSIFIERS = Object.freeze({
    * instead, which is what a frontend links from.
    */
   'trade.bot.paused': {
+    payloadKeys: [],
     category: 'trading',
     type: 'trading.bot_paused',
     visibility: 'user',
@@ -1099,6 +1211,7 @@ export const CLASSIFIERS = Object.freeze({
    * revocation, so it is the identifier that makes the entry actionable.
    */
   'devplatform.key.issued': {
+    payloadKeys: ['display', 'environment'],
     category: 'api',
     type: 'api.key_issued',
     visibility: 'user',
@@ -1150,6 +1263,7 @@ export const CLASSIFIERS = Object.freeze({
    * this" means precisely "no user is attributed" rather than approximately.
    */
   'devplatform.key.revoked': {
+    payloadKeys: ['display', 'reason'],
     category: 'api',
     type: (event) =>
       userFromActor(event) === null ? 'api.key_revoked_by_platform' : 'api.key_revoked',
@@ -1186,6 +1300,7 @@ export const CLASSIFIERS = Object.freeze({
    * this is. Each entry cites the rule it follows.
    * ------------------------------------------------------------------------------------------ */
   'tessera.parcel.claimed': {
+    payloadKeys: ['ownerSubject', 'tier', 'tiles'],
     category: 'ownership',
     type: 'ownership.parcel_claimed',
     visibility: 'user',
@@ -1208,6 +1323,7 @@ export const CLASSIFIERS = Object.freeze({
    * calls it "the party this event is ABOUT: whoever is losing ground" — and this reads that one.
    */
   'tessera.parcel.fallowed': {
+    payloadKeys: ['ownerSubject'],
     category: 'ownership',
     type: 'ownership.parcel_contested',
     visibility: 'user',
@@ -1234,6 +1350,7 @@ export const CLASSIFIERS = Object.freeze({
    * database, so it cannot write the buyer's entry too. Same limit as `market.listing.sold`.
    */
   'tessera.parcel.transferred': {
+    payloadKeys: ['fromSubject', 'reason'],
     category: 'ownership',
     type: (event) =>
       text(event, 'reason', 32) === 'contest' ? 'ownership.parcel_lost' : 'ownership.parcel_transferred',
@@ -1245,6 +1362,7 @@ export const CLASSIFIERS = Object.freeze({
         : 'A parcel you held changed hands.',
   },
   'tessera.object.fired': {
+    payloadKeys: ['authorSubject', 'category', 'c2pa'],
     category: 'ownership',
     type: 'ownership.object_fired',
     visibility: 'user',
@@ -1260,6 +1378,7 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   'tessera.object.anchored': {
+    payloadKeys: ['authorSubject', 'transactionHash'],
     category: 'ownership',
     type: 'ownership.object_anchored',
     visibility: 'user',
@@ -1283,6 +1402,7 @@ export const CLASSIFIERS = Object.freeze({
    * `internal`, and the owner is `null` rather than guessed from the ward.
    */
   'tessera.ward.opened': {
+    payloadKeys: ['name', 'archetype'],
     category: 'community',
     type: 'community.ward_opened',
     visibility: 'internal',
@@ -1309,6 +1429,7 @@ export const CLASSIFIERS = Object.freeze({
    * in EMBER, converted here and nowhere else, or omitted entirely if it does not parse.
    */
   'tessera.venue.booked': {
+    payloadKeys: ['ownerSubject', 'hours', 'priceWei'],
     category: 'market',
     type: 'market.venue_booked',
     visibility: 'user',
@@ -1350,6 +1471,11 @@ export function classify(envelope: EventEnvelope, known: boolean): Classified {
   const subjectUrn = subjectUrnFor(envelope.producer, aggregate, envelope.key)
 
   if (!known) {
+    // `null` is the quarantine rule, not an empty allowlist: there is no declaration to check
+    // against, so the payload keeps its structure and its identifiers and loses its prose. See
+    // `redact.ts` — dropping it outright would destroy the reclassification the quarantine exists
+    // for, and keeping it verbatim is the defect this whole path was.
+    const redaction = redactPayload(envelope.payload, null)
     return {
       category: UNCLASSIFIED,
       type: envelope.topic,
@@ -1361,11 +1487,14 @@ export function classify(envelope: EventEnvelope, known: boolean): Classified {
       amount: null,
       assetCode: null,
       visibility: 'internal',
+      payload: redaction.payload,
+      redactedKeys: redaction.dropped,
     }
   }
 
   const classifier: TopicClassifier = CLASSIFIERS[envelope.topic]
   const userId = classifier.userId(envelope)
+  const redaction = redactPayload(envelope.payload, classifier.payloadKeys)
   return {
     category: classifier.category,
     type: typeof classifier.type === 'function' ? classifier.type(envelope) : classifier.type,
@@ -1378,6 +1507,8 @@ export function classify(envelope: EventEnvelope, known: boolean): Classified {
     // this, a `settlement.withdrawal.stuck` with no user in its payload would be a `user`-visible
     // record that no user can ever see, which reads on a dashboard as a delivered notification.
     visibility: userId === null ? 'internal' : classifier.visibility,
+    payload: redaction.payload,
+    redactedKeys: redaction.dropped,
   }
 }
 

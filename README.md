@@ -89,11 +89,21 @@ is the acknowledgement.
 
 ## 2. Background jobs
 
-One, and it is leased.
+Two, and both are leased.
 
 | Job | Kind | Lease key | Interval | What it does |
 | --- | --- | --- | --- | --- |
-| Inbox prune | `activity.inbox.prune` | `global` | hourly (`src/jobs.ts:28`) | Deletes inbox rows older than `ACTIVITY_INBOX_RETENTION_DAYS`. |
+| Inbox prune | `activity.inbox.prune` | `global` | hourly (`src/jobs.ts`) | Deletes inbox rows older than `ACTIVITY_INBOX_RETENTION_DAYS`. |
+| Record prune | `activity.records.prune` | `global` | six-hourly (`src/jobs.ts`) | **Enforces storage limitation.** Deletes records past the retention period of their `retention_class` — see `src/retention.ts` for the four periods and the lawful basis for each. |
+
+**How to see the record prune having run**, in increasing order of how much it survives:
+`activity_records_pruned_total{class="…"}` counts deletions per class; the `record retention prune`
+log line reports counts and class names (never a record, never a field of one); the `jobs` row for
+`activity.records.prune` carries its next `run_at`, so an operator can query the schedule itself.
+And `activity_retention_overdue_total` is scraped from the `activity_records_retention` **view**
+rather than from anything the job reports — because a job that has stopped running reports nothing,
+and "nothing" and "nothing to do" are the two states that number exists to tell apart. Healthy is a
+flat zero.
 
 **If two replicas run it:** they cannot. The job row is claimed `FOR UPDATE SKIP LOCKED` by
 `@cloudsforge/jobs`, and the lease key names the contended resource rather than a row — this is an
@@ -194,8 +204,18 @@ itself fail may sit between a configuration error and the report of it.
 | `ACTIVITY_DATABASE_POOL_MAX` | `10` (1–100) | A pool larger than the database's connection budget divided by the replica count exhausts Postgres for everything else the moment this scales. |
 | `ACTIVITY_DELIVERY_TOLERANCE_MS` | `300000` (5 000–900 000) | How much clock skew and relay delay a signature may carry. **A knob to turn down, not up**: widening it makes a captured request a longer-lived credential. |
 | `ACTIVITY_INBOX_RETENTION_DAYS` | `30` (7–365) | Must outlive every producer's retry horizon. Too short and a redelivery is processed as new — caught by the unique constraint, which is exactly why that constraint is in the schema. |
+| `ACTIVITY_RETENTION_FINANCIAL_DAYS` | `1825` (365–1825) | How long a financial record is kept. Five years is an AML/CTF record-keeping obligation. |
+| `ACTIVITY_RETENTION_PERSONAL_DAYS` | `730` (30–730) | A person's own timeline: the product promise, and reconstructing an account takeover. |
+| `ACTIVITY_RETENTION_OPERATIONAL_DAYS` | `400` (30–400) | Owner-less records with no financial content. |
+| `ACTIVITY_RETENTION_QUARANTINE_DAYS` | `90` (7–90) | `unclassified` rows. Short on purpose: a topic nobody classified must not become a permanent store of a payload nobody has read. |
 | `INSTANCE_ID` | hostname | Names this replica in `jobs.locked_by`. |
 | `CLOUDSFORGE_TAG` | `dev` | Reported on every log line and in the release manifest. |
+
+**Every `ACTIVITY_RETENTION_*_DAYS` maximum is its own default, and that is the point.** A
+deployment may shorten a retention period and can never lengthen one, so the numbers in
+`src/retention.ts` are an upper bound on what any deployment of this service retains rather than a
+suggestion it is free to ignore — `ACTIVITY_RETENTION_FINANCIAL_DAYS=3650` is refused by name at
+boot. Nothing needs to be set: an estate that configures none of this still enforces a period.
 
 `OUTBOX_SIGNING_SECRET` is absent deliberately — this service publishes nothing. `OTEL_*` is read by
 the OpenTelemetry SDK loaded ahead of the process, not by `src/env.ts`, so under rule 9 it is not
