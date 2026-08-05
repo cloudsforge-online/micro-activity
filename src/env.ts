@@ -17,6 +17,7 @@
  */
 
 import { hostname } from 'node:os'
+import { assertGeneratedSecretList } from '@cloudsforge/secrets'
 import { RETENTION_DAYS, type RetentionClass } from './retention.ts'
 
 /**
@@ -33,22 +34,6 @@ export class EnvError extends Error {
     this.name = 'EnvError'
   }
 }
-
-/**
- * Values that must never be accepted. The list is short on purpose: it holds the strings that
- * actually appear in this repository's own `.env.example` and compose files, because those are
- * the ones that get copied into a deployment by someone in a hurry.
- */
-const PLACEHOLDERS = new Set([
-  'changeme',
-  'change-me',
-  'placeholder',
-  'secret',
-  'dev-secret',
-  'dev-outbox-signing-secret',
-  'replace-with-a-real-secret',
-  'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-])
 
 type Source = Readonly<Record<string, string | undefined>>
 
@@ -81,8 +66,36 @@ function integer(source: Source, name: string, fallback: number, min: number, ma
  * reports which one matched, so an operator publishes the new secret, both are accepted for a
  * window, and then the old one is removed. A single-secret variable would make every rotation an
  * outage, which is how a secret ends up never being rotated at all.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **THE PER-ENTRY `PLACEHOLDERS` SET AND 24-CHARACTER FLOOR USED TO LIVE HERE, AND THEY ARE GONE
+ * RATHER THAN KEPT IN FRONT OF THE SHAPE CHECK.**
+ *
+ * `ACTIVITY_INGEST_SECRETS` is one of the seven names the estate spells a single shared HMAC key
+ * under, and that key sat in a PUBLIC compose file as `estate-only-outbox-secret-00000000000000`
+ * on 54 lines. The old rule here — a fixed deny-list of exact strings plus a 24-character floor —
+ * could not have refused it: 40 characters, and on nobody's list. A check that could not fail read
+ * as the absence of a problem, which is worse than no check at all (micro-org #142).
+ *
+ * A deny-list of exact strings cannot work, because the next placeholder somebody writes is by
+ * definition not on it. `assertGeneratedSecretList` asserts what a placeholder cannot have, per
+ * entry: the base64 or hex alphabet (no hyphens — every placeholder this estate wrote had one), 32
+ * decoded BYTES rather than 24 keystrokes, and a measured Shannon entropy floor. Every string the
+ * old set held is refused by that anyway, and running the weaker rule first would answer a
+ * 40-character placeholder with "must be at least 24 characters" — true, useless, and about the
+ * wrong property.
+ *
+ * **Every entry, including the outgoing one.** In a rotation overlap window the outgoing key is the
+ * one an attacker already holds if it leaked, and "just for the drain" is exactly how a placeholder
+ * survives the rotation meant to remove it.
+ *
+ * This is the check that stands between an unauthenticated POST and the canonical record of what
+ * happened to a user's money, so there is no NODE_ENV exemption and no escape hatch. What is kept
+ * is what the shape check does not know about: this service's own empty and four-deep refusals,
+ * whose messages name the variable and this service.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
-function requiredSecrets(source: Source, name: string, minLength = 24): readonly string[] {
+function requiredSecrets(source: Source, name: string): readonly string[] {
   const raw = required(source, name)
   const secrets = raw
     .split(',')
@@ -90,16 +103,7 @@ function requiredSecrets(source: Source, name: string, minLength = 24): readonly
     .filter((secret) => secret.length > 0)
   if (secrets.length === 0) throw new EnvError(`${name} is required — ${SERVICE} refuses to start without it`)
   if (secrets.length > 4) throw new EnvError(`${name} carries more than four secrets; a rotation is not four deep`)
-  for (const secret of secrets) {
-    if (PLACEHOLDERS.has(secret.toLowerCase())) {
-      throw new EnvError(`${name} contains a known placeholder — generate a real secret`)
-    }
-    // Length is a proxy for entropy and the only one available here. It is set above the point at
-    // which a human-chosen string is plausible, so a memorable password fails this check too.
-    if (secret.length < minLength) {
-      throw new EnvError(`every secret in ${name} must be at least ${minLength} characters`)
-    }
-  }
+  assertGeneratedSecretList(name, secrets)
   return Object.freeze(secrets)
 }
 
