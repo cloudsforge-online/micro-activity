@@ -71,7 +71,11 @@ test('a known event is classified, attributed and summarised', () => {
   const { envelope } = delivery({
     topic: 'wallet.deposit.confirmed',
     key: 'wallet-1',
-    payload: { userId: ALICE, amount: '25.5', assetCode: 'SHARD' },
+    // The pair as wallet actually emits it (`wallet/src/deposits.ts:768-770`): the raw smallest
+    // units AND the decimal figure wallet converted with the asset's `decimals`. The fixture used
+    // to carry `amount: '25.5'` alone, which is a payload wallet has never sent — 25.5 of a
+    // SHARD's indivisible units is 2.55e-17 SHARD, and asserting on it proved nothing.
+    payload: { userId: ALICE, amount: '25500000000000000000', amountFormatted: '25.5', assetCode: 'SHARD' },
   })
   const classified = classify(envelope, true)
   assert.equal(classified.category, 'deposit')
@@ -708,10 +712,18 @@ test('a sweep is an internal treasury movement and lands in no user\'s feed', ()
   assert.match(swept.summary, /ethereum mainnet/)
 
   // The amount is a smallest-units integer (settlement/src/withdrawals.ts:123) and the payload
-  // carries no decimals, so it stays in its typed column and out of the prose. A figure eighteen
-  // orders of magnitude wrong is worse than no figure.
-  assert.equal(swept.amount, '1000000000000000000')
+  // carries no decimals, so it reaches neither the prose NOR the column. A figure eighteen orders
+  // of magnitude wrong is worse than no figure.
+  //
+  // The column half of that reversed with #199: this assertion used to read
+  // `assert.equal(swept.amount, '1000000000000000000')`, on the theory that the column was typed
+  // storage rather than presentation. `hub-web/src/pages/activity.tsx:202` renders it through a
+  // decimal formatter beside `record.assetCode`, so it was presentation all along.
+  assert.equal(swept.amount, null)
   assert.doesNotMatch(swept.summary, /1000000000000000000/)
+  // Not lost, though — the classifier declares `amount`, so the producer's own integer survives
+  // verbatim in the stored payload, where nothing renders it as money.
+  assert.equal(swept.payload['amount'], '1000000000000000000')
 
   // A user id smuggled onto the payload does not make a treasury movement somebody's news.
   const withUser = classify(
@@ -878,8 +890,11 @@ test("a refunded withdrawal and a stuck one say opposite things about where the 
   assert.match(refunded.summary, /returned to your balance/)
 
   // wallet's `amount` is smallest units (`wallet/src/withdrawals.ts:167-173`) with no decimals on
-  // the payload: the typed column keeps it, the prose does not print it.
-  assert.equal(refunded.amount, '2500000000000000000')
+  // the payload, so neither the prose nor the column prints it. The column assertion was
+  // `'2500000000000000000'` until #199; it is null now, because a frontend renders that column as
+  // a decimal figure and the record is `user`-visible — this was the raw integer reaching a real
+  // person by the one route the prose rule did not cover.
+  assert.equal(refunded.amount, null)
   assert.doesNotMatch(refunded.summary, /2500000000000000000/)
 
   // `reason` is `${err.code}: ${err.message}` and carries a destination address on a chain error.
@@ -915,6 +930,163 @@ test("a refunded withdrawal and a stuck one say opposite things about where the 
   assert.equal(stuck.type, 'withdrawal.stuck_no_settlement')
   assert.equal(CLASSIFIERS['settlement.withdrawal.stuck'].type, 'withdrawal.stuck')
   assert.notEqual(stuck.type, CLASSIFIERS['settlement.withdrawal.stuck'].type)
+})
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+ * ── SMALLEST UNITS NEVER REACH A PERSON (micro-org#199) ───────────────────────────────────────
+ *
+ * The defect these close, in the words a user read it in:
+ *
+ *   > "Deposit of 2500000000000000000 SHARD confirmed and credited."
+ *
+ * Three summaries printed `payload.amount` as though it were a decimal figure, and the `amount`
+ * COLUMN took the same value for every money topic in the estate — where
+ * `hub-web/src/pages/activity.tsx:186,202` renders it through a decimal formatter beside
+ * `record.assetCode`. Both routes are covered here, because fixing only the prose would have
+ * moved the wrong number one column to the right and called it typed.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/** 2.5 SHARD, in the units wallet, settlement, ledger and market all put on the wire. */
+const SMALLEST_UNITS = '2500000000000000000'
+
+/**
+ * The producers whose `amount` is an integer count of indivisible units.
+ *
+ * **Written out here rather than imported from `classify.ts`.** Two copies that must agree is the
+ * point: a test that imported the service's own set could only prove the code equals itself, and
+ * would pass on the day somebody quietly dropped `wallet` from it. The evidence for each is in
+ * `money`'s header in `classify.ts`, and each entry is a schema or an emit-site citation.
+ */
+const SMALLEST_UNIT_PRODUCERS = new Set(['wallet', 'settlement', 'ledger', 'market'])
+
+test('THE RULE: a smallest-units figure reaches neither a summary nor the amount column, on any topic', () => {
+  // Driven over every registered topic of the four producers rather than over the three named in
+  // the issue, because "the three that predate the precedent" is a description of how the defect
+  // was found and not of where it can occur. A wallet topic registered tomorrow is covered on the
+  // day it lands, which is the same reason `classify` keys the rule on the producer.
+  //
+  // `drift` is deliberately absent from the payload: `ledger.reconciliation.completed` is the
+  // file's one documented exception (internal, no user, no asset code, nothing emits it), and a
+  // fixture that fed it would be asserting against a rule this repository does not claim.
+  let checked = 0
+  for (const topic of TOPIC_NAMES) {
+    if (!SMALLEST_UNIT_PRODUCERS.has(TOPICS[topic].producer)) continue
+    const classified = classify(
+      delivery({
+        topic,
+        key: ALICE,
+        // Every spelling of "who this is about" the four producers use, so the record resolves to
+        // a user and the classifier takes its user-visible branch rather than an anonymous one.
+        payload: {
+          userId: ALICE,
+          sellerSubject: `user:${ALICE}`,
+          ownerSubject: `user:${ALICE}`,
+          amount: SMALLEST_UNITS,
+          price: SMALLEST_UNITS,
+          assetCode: 'SHARD',
+        },
+      }).envelope,
+      true,
+    )
+    assert.doesNotMatch(
+      classified.summary,
+      new RegExp(SMALLEST_UNITS),
+      `${topic} prints a smallest-units integer in a summary a user reads`,
+    )
+    assert.equal(
+      classified.amount,
+      null,
+      `${topic} files a smallest-units integer under the column hub-web renders as a decimal`,
+    )
+    checked += 1
+  }
+  assert.ok(checked >= 15, `only ${checked} money topics were checked`)
+})
+
+test('a deposit prints the figure wallet converted, and never the one it did not', () => {
+  // The pair as `wallet/src/deposits.ts:768-770` emits it. wallet is the only party that can do
+  // this conversion — it needs `chainSpec(assetCode).decimals`, and a classifier may not read a
+  // database to find one — so where the pair is on the payload it is authoritative.
+  const credited = classify(
+    delivery({
+      topic: 'wallet.deposit.confirmed',
+      key: 'wallet-1',
+      payload: { userId: ALICE, amount: SMALLEST_UNITS, amountFormatted: '2.5', assetCode: 'SHARD' },
+    }).envelope,
+    true,
+  )
+  assert.equal(credited.summary, 'Deposit of 2.5 SHARD confirmed and credited.')
+  assert.equal(credited.amount, '2.5')
+  // The sentence a user actually read before #199, asserted as a string so the regression cannot
+  // come back through a reworded summary.
+  assert.notEqual(credited.summary, `Deposit of ${SMALLEST_UNITS} SHARD confirmed and credited.`)
+
+  // Both halves survive the allowlist: the decimal one is what a person reads, and the raw one is
+  // wallet's own figure, kept in its own units in a JSON document nothing renders as money.
+  assert.equal(credited.payload['amountFormatted'], '2.5')
+  assert.equal(credited.payload['amount'], SMALLEST_UNITS)
+
+  // A deposit whose producer sent no formatted figure still names the asset. The old fallback was
+  // "A deposit was confirmed.", which threw away a fact that was on the payload and is not a scale
+  // question — the code is knowable here and only the number is not.
+  const bare = classify(
+    delivery({
+      topic: 'wallet.deposit.confirmed',
+      key: 'wallet-1',
+      payload: { userId: ALICE, amount: SMALLEST_UNITS, assetCode: 'SHARD' },
+    }).envelope,
+    true,
+  )
+  assert.equal(bare.summary, 'A SHARD deposit was confirmed and credited.')
+  assert.equal(bare.amount, null)
+})
+
+test('a withdrawal requested and one completed name the asset and decline the figure', () => {
+  // `WithdrawalRequestedPayload` (`wallet/src/withdrawals.ts:434-447`) sends `amount`, `fee` and
+  // `net` raw and nothing formatted — twenty lines below `toWithdrawal`, which converts the same
+  // row for wallet's own API response. So this is an omission in micro-wallet, and the day it is
+  // repaired `money` picks the formatted field up and this summary starts printing the figure with
+  // no change in this file. Until then the sentence declines it rather than guessing at eighteen.
+  const requested = classify(
+    delivery({
+      topic: 'wallet.withdrawal.requested',
+      key: 'wallet-1',
+      payload: { userId: ALICE, amount: SMALLEST_UNITS, fee: '1000', net: '2499999999999999000', assetCode: 'SHARD' },
+    }).envelope,
+    true,
+  )
+  assert.equal(requested.summary, 'A SHARD withdrawal was requested.')
+  assert.equal(requested.amount, null)
+  assert.notEqual(requested.summary, `Withdrawal of ${SMALLEST_UNITS} SHARD requested.`)
+
+  // Settlement's side of the same money. `base(row)` puts `row.amount.toString()` on the payload
+  // (`settlement/src/withdrawals.ts:509-519`) and settlement's own parser calls that field "a
+  // decimal string of smallest units" (`withdrawals.ts:120-126`), so it is the same scale again.
+  // The hash stays: it is the fact a user can check against a block explorer, and it is not money.
+  const completed = classify(
+    delivery({
+      topic: 'settlement.withdrawal.completed',
+      key: WITHDRAWAL,
+      payload: {
+        withdrawalId: WITHDRAWAL,
+        userId: ALICE,
+        amount: SMALLEST_UNITS,
+        assetCode: 'SHARD',
+        transactionHash: '0xabc',
+      },
+    }).envelope,
+    true,
+  )
+  assert.equal(completed.summary, 'Your SHARD withdrawal was sent in 0xabc.')
+  assert.equal(completed.amount, null)
+  assert.notEqual(completed.summary, `${SMALLEST_UNITS} SHARD was sent in 0xabc.`)
+
+  // Both are the user's own news, not internal — the repair removes a figure and nothing else.
+  for (const record of [requested, completed]) {
+    assert.equal(record.userId, ALICE)
+    assert.equal(record.visibility, 'user')
+    assert.equal(record.assetCode, 'SHARD')
+  }
 })
 
 /* ------------------------------------------------------------------ delivery parsing */
@@ -1042,13 +1214,18 @@ test('a cursor round-trips, and a forged one is refused rather than misread', ()
 /* ------------------------------------------------------------------ the payload allowlist */
 
 /**
- * The three keys `classify` reads for EVERY topic, on its own account rather than a classifier's.
+ * The keys `classify` reads for EVERY topic, on its own account rather than a classifier's.
  *
  * They are exempt from the "declared or not read" half of the rule below and not from the other
  * half: a topic may decline to declare them, and a topic that declares them is stating that this
  * is a payload which really carries them. `identity.user.registered` declaring `price` would fail.
+ *
+ * `amountFormatted` and `priceFormatted` joined them with `money` (`classify.ts`): the `amount`
+ * column is filled from the producer's own decimal figure where there is one, so both spellings
+ * are probed on every topic. `wallet.deposit.confirmed` declares `amountFormatted` because wallet
+ * genuinely sends it (`wallet/src/deposits.ts:770`), which is exactly what a declaration means.
  */
-const GENERIC_KEYS = new Set(['amount', 'price', 'assetCode'])
+const GENERIC_KEYS = new Set(['amount', 'amountFormatted', 'price', 'priceFormatted', 'assetCode'])
 
 /** Every payload key a classifier touches, recorded by handing it a payload that watches. */
 function keysReadBy(topic: TopicName): Set<string> {

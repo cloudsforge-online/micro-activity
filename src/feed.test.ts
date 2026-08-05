@@ -50,6 +50,19 @@ beforeEach(async () => {
 
 const BASE = Date.UTC(2026, 6, 30, 12, 0, 0)
 
+/**
+ * A decimal figure as the 18-decimal integer wallet would put beside it.
+ *
+ * Fixtures here send the PAIR wallet really sends (`wallet/src/deposits.ts:768-770`), not a bare
+ * decimal `amount` — since micro-org#199 the `amount` column is filled from `amountFormatted` for
+ * a smallest-units producer, so a fixture with only the decimal half would be testing a payload
+ * wallet has never emitted and would quietly assert null.
+ */
+function smallestUnits(formatted: string): string {
+  const [whole = '0', fraction = ''] = formatted.split('.')
+  return (BigInt(whole) * 10n ** 18n + BigInt(fraction.padEnd(18, '0') || '0')).toString()
+}
+
 /** One deposit for `user`, at `minute` minutes past the base instant. */
 async function deposit(user: string, minute: number, amount = '1'): Promise<void> {
   await ingest(
@@ -58,7 +71,12 @@ async function deposit(user: string, minute: number, amount = '1'): Promise<void
       delivery({
         topic: 'wallet.deposit.confirmed',
         key: `wallet-${user}`,
-        payload: { userId: user, amount, assetCode: 'SHARD' },
+        payload: {
+          userId: user,
+          amount: smallestUnits(amount),
+          amountFormatted: amount,
+          assetCode: 'SHARD',
+        },
         occurredAt: new Date(BASE + minute * 60_000),
       }).body,
     ),
@@ -355,6 +373,11 @@ test('the feed filters by category and by product', { skip }, async () => {
 test('the amount is stored exactly as the producer wrote it', { skip }, async () => {
   // numeric(40,18) would return "10.000000000000000000" for a deposit of 10, and a feed that
   // reformats a user's money is a feed they do not trust.
+  //
+  // "as the producer wrote it" means `amountFormatted` for a smallest-units producer, and the
+  // point survives the change intact: the column is still a `text` copy of a decimal string the
+  // producer chose, still not re-rendered, and the one-wei deposit still keeps all eighteen of its
+  // digits. What it is no longer is the producer's INTEGER, which was never that decimal string.
   await deposit(ALICE, 1, '10')
   await deposit(ALICE, 2, '0.000000000000000001')
   const page = await listFeed(db(), { userId: ALICE, limit: 10, includeInternal: false })

@@ -160,7 +160,10 @@ test('THE RULE: ingesting the same event twice leaves one record in the feed', {
     const event = delivery({
       topic: 'wallet.deposit.confirmed',
       key: 'wallet-1',
-      payload: { userId: ALICE, amount: '25', assetCode: 'SHARD' },
+      // 25 SHARD as wallet sends it (`wallet/src/deposits.ts:768-770`): the raw smallest units
+      // AND the decimal figure only wallet can compute. The assertion below is on the summary the
+      // user reads, and since micro-org#199 that sentence is built from the formatted half.
+      payload: { userId: ALICE, amount: '25000000000000000000', amountFormatted: '25', assetCode: 'SHARD' },
     })
 
     const first = await post(h.url, token, event.body, event.signature)
@@ -358,7 +361,16 @@ test('the feed pages by cursor over HTTP, and the cursor is opaque', { skip }, a
       const event = delivery({
         topic: 'wallet.deposit.confirmed',
         key: `w-${minute}`,
-        payload: { userId: ALICE, amount: String(minute), assetCode: 'SHARD' },
+        // The pair wallet emits (`wallet/src/deposits.ts:768-770`). The assertions below are on
+        // the ORDER of the page rather than on the figures, but they read the `amount` column to
+        // do it, and since micro-org#199 that column is filled from the formatted half — a bare
+        // decimal `amount` from a smallest-units producer would land as null and assert nothing.
+        payload: {
+          userId: ALICE,
+          amount: `${minute}000000000000000000`,
+          amountFormatted: String(minute),
+          assetCode: 'SHARD',
+        },
         occurredAt: new Date(Date.UTC(2026, 6, 30, 12, minute, 0)),
       })
       await post(h.url, token, event.body, event.signature)

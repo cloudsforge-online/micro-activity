@@ -123,7 +123,11 @@ function text(envelope: EventEnvelope, field: string, max = 64): string | null {
   return value.length > max ? `${value.slice(0, max - 1)}…` : value
 }
 
-/** A decimal amount. Kept as a string throughout: a feed that rounded a balance would be a lie. */
+/**
+ * A numeric field, as a string. **The SCALE is not known here** — see `money` below, which is what
+ * every money path must use. Kept as a string throughout: a feed that rounded a balance would be
+ * a lie.
+ */
 function amount(envelope: EventEnvelope, field = 'amount'): string | null {
   const value = payloadOf(envelope)[field]
   if (typeof value === 'string' && /^-?\d+(?:\.\d+)?$/.test(value)) return value
@@ -133,6 +137,93 @@ function amount(envelope: EventEnvelope, field = 'amount'): string | null {
 function asset(envelope: EventEnvelope, field = 'assetCode'): string | null {
   const value = payloadOf(envelope)[field]
   return typeof value === 'string' && /^[A-Z][A-Z0-9:_-]{0,31}$/.test(value) ? value : null
+}
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * ── THE PRODUCERS WHOSE `amount` IS SMALLEST UNITS, AND THE EVIDENCE FOR EACH ─────────────────
+ *
+ * A payload field called `amount` is not a unit. Half the estate spells a decimal figure with
+ * that name and half spells an integer count of the asset's indivisible units with it, and the
+ * two differ by up to eighteen orders of magnitude with nothing on the wire to tell them apart:
+ * `2.5` and `2500000000000000000` are both `/^\d+(\.\d+)?$/`, and neither carries a `decimals`.
+ *
+ * A classifier may not read a database (see the header), so this file cannot convert. What it CAN
+ * do is know which producers speak which dialect, because the producer is on the envelope and the
+ * topic namespace is the ownership boundary — `contracts-events` already refuses an event whose
+ * producer does not own its topic, so `envelope.producer` is as trustworthy as the topic name.
+ *
+ * The set is keyed on the PRODUCER rather than on a list of topics deliberately: a wallet topic
+ * registered tomorrow is smallest units on the day it lands, and a topic list would have to be
+ * remembered. This is the same argument as the `satisfies Record<TopicName, …>` above — make the
+ * default safe, rather than trusting the next person to add a line.
+ *
+ *   - `wallet`      — `toWithdrawal` stores `amount: row.amount` and separately computes
+ *                     `formatAmount(BigInt(row.amount), decimals)` (`wallet/src/withdrawals.ts:167-173`);
+ *                     `wallet/src/deposits.ts:768-770` emits the same pair. The raw side is the
+ *                     one named `amount`.
+ *   - `settlement`  — `units()` refuses anything but `/^\d+$/` and calls it "a decimal string of
+ *                     smallest units" (`settlement/src/withdrawals.ts:120-126`); `base(row)` puts
+ *                     `row.amount.toString()` on every outbound payload (`withdrawals.ts:509-519`).
+ *   - `ledger`      — `postings.amount` is `numeric(78,0)` (`ledger/src/migrations.ts:219`), an
+ *                     integer column with no fractional part to hold a decimal in.
+ *   - `market`      — `orders.amount` and `bids.amount` are `numeric(78,0)` too
+ *                     (`market/src/migrations.ts:344,402`), and `orderEventPayload` emits
+ *                     `order.amount.toString()` (`market/src/orders.ts:508-519`).
+ *
+ * Adding a producer here is a one-line change and removing one needs the same kind of citation.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════ */
+const SMALLEST_UNIT_PRODUCERS: ReadonlySet<ProducerService> = new Set<ProducerService>([
+  'wallet',
+  'settlement',
+  'ledger',
+  'market',
+])
+
+/**
+ * **A figure that may be shown to a person as money, or null when there is not one.**
+ *
+ * The only reader a summary or the `amount` COLUMN may use. `amount()` above answers "what number
+ * is on the payload"; this answers the question that actually matters, "what number may be
+ * rendered beside an asset code", and those are not the same question.
+ *
+ * Three outcomes, in order:
+ *
+ * 1. **The producer already converted it.** `<field>Formatted` is the estate's spelling for the
+ *    decimal side of the pair — wallet emits `amount`/`amountFormatted` together and only wallet
+ *    knows the asset's `decimals`, because only wallet can call `chainSpec`. Where it is on the
+ *    payload it is authoritative and it is used.
+ * 2. **The producer deals in smallest units and did not convert it.** Null — "not stated". Not a
+ *    guess at eighteen decimals, which is right for EMBER and SHARD and wrong for USDC, and not
+ *    the raw integer either. This is the refusal `tessera.venue.booked` and
+ *    `settlement.sweep.completed` already wrote out longhand, applied once for every topic.
+ * 3. **Anything else** is decimal on the wire and passes through unchanged.
+ *
+ * ── WHY THE `amount` COLUMN GOES THROUGH THIS TOO, WHICH IS A REVERSAL ────────────────────────
+ *
+ * Two comments below used to say the figure "still reaches the record's own columns, where it is
+ * typed and not prose", and treated the column as a safe place to put a number of unknown scale.
+ * **That was wrong, and there is a file that proves it:** `hub-web/src/pages/activity.tsx:186,202`
+ * renders `formatAmount(record.amount)` immediately followed by `record.assetCode`, and
+ * `hub-web/src/lib/format.ts:109` is a DECIMAL formatter with a thousands separator. So a
+ * smallest-units integer in that column is not typed data at rest — it is
+ * "2,500,000,000,000,000,000 SHARD" in the same feed row as the summary, one hop later. The
+ * column is prose with extra steps, so it gets the prose rule.
+ *
+ * Nothing is silently lost by that: every classifier that cares declares `amount` in its
+ * `payloadKeys`, so the producer's own figure survives verbatim in `activity_records.payload`,
+ * where it is a labelled field in a JSON document and no frontend renders it as money.
+ */
+function money(envelope: EventEnvelope, field = 'amount'): string | null {
+  // BOTH reads happen, always, and unconditionally rather than behind the early return. The
+  // "declared or not read" test drives this file against a recording Proxy in both directions, so
+  // a short-circuit here would make a classifier that legitimately declares `amount` fail as
+  // over-declared the moment its producer joined the set above.
+  const formatted = amount(envelope, `${field}Formatted`)
+  const raw = amount(envelope, field)
+  if (formatted !== null) return formatted
+  if (raw === null) return null
+  return SMALLEST_UNIT_PRODUCERS.has(envelope.producer) ? null : raw
 }
 
 /** EMBER's wei exponent — the same 18 `contracts-money` uses. */
@@ -462,13 +553,17 @@ export const CLASSIFIERS = Object.freeze({
     type: 'transfer.entry_posted',
     visibility: 'user',
     userId: userFromPayload,
+    // `postings.amount` is `numeric(78,0)` (`ledger/src/migrations.ts:219`) — an integer column,
+    // so ledger is in `SMALLEST_UNIT_PRODUCERS` and `money` returns null here today. The fallback
+    // therefore has to carry the asset and the kind rather than shrug: "A ledger entry was posted"
+    // with no other word in it is a feed row that tells its reader nothing they did not know.
     summary: (event) => {
-      const value = amount(event)
+      const value = money(event)
       const code = asset(event)
       const kind = text(event, 'kind', 32)
-      return value && code
-        ? `${value} ${code} moved${kind ? ` (${kind})` : ''}.`
-        : 'A ledger entry was posted against your account.'
+      const qualified = kind ? ` (${kind})` : ''
+      if (value && code) return `${value} ${code} moved${qualified}.`
+      return `A ledger entry was posted against your account${code ? ` in ${code}` : ''}${qualified}.`
     },
   },
   /**
@@ -492,6 +587,11 @@ export const CLASSIFIERS = Object.freeze({
     // worth a permanent, queryable record — and this is the service that keeps those.
     visibility: 'internal',
     userId: () => null,
+    // `amount`, not `money`, and it is the one deliberate exception in the file. A drift is a
+    // residual in the ledger's own units, printed with no asset code beside it, to an operator who
+    // is about to go and read `postings` — nobody is being shown a price. Passing it through
+    // `money` would blank the only fact the sentence carries, to protect a reader who does not
+    // exist: this topic has `internal` visibility and no user, and nothing emits it (see above).
     summary: (event) => {
       const drift = amount(event, 'drift')
       return drift ? `Reconciliation completed with drift ${drift}.` : 'Reconciliation completed.'
@@ -526,18 +626,45 @@ export const CLASSIFIERS = Object.freeze({
         : `A wallet was created for you${where}.`
     },
   },
+  /**
+   * **The one money topic in the estate that can print its figure, because its producer sent one.**
+   *
+   * `amountFormatted` is declared and read, and `money` prefers it over the raw `amount` beside
+   * it. wallet emits the pair from one place (`wallet/src/deposits.ts:768-770`) and it is the only
+   * party that can: the conversion needs `chainSpec(assetCode).decimals`, and a classifier may not
+   * go and look that up. Where the pair exists, the user gets the sentence they want.
+   *
+   * The fallback is not the old one. "A deposit was confirmed." threw away the asset code as well
+   * as the figure, and the code is on the payload, is not a scale question and is the difference
+   * between "some money arrived" and "your SHARD arrived". Only the number is unknown.
+   */
   'wallet.deposit.confirmed': {
-    payloadKeys: ['userId', 'amount', 'assetCode'],
+    payloadKeys: ['userId', 'amount', 'amountFormatted', 'assetCode'],
     category: 'deposit',
     type: 'deposit.confirmed',
     visibility: 'user',
     userId: userFromPayload,
     summary: (event) => {
-      const value = amount(event)
+      const value = money(event)
       const code = asset(event)
-      return value && code ? `Deposit of ${value} ${code} confirmed and credited.` : 'A deposit was confirmed.'
+      if (value && code) return `Deposit of ${value} ${code} confirmed and credited.`
+      return code ? `A ${code} deposit was confirmed and credited.` : 'A deposit was confirmed.'
     },
   },
+  /**
+   * **No figure, and it is wallet's payload that decides that rather than a preference here.**
+   *
+   * `WithdrawalRequestedPayload` sends `amount`, `fee` and `net` and nothing formatted
+   * (`wallet/src/withdrawals.ts:434-447`) — the same row that `toWithdrawal` twenty lines earlier
+   * converts for its API response, so the omission is an inconsistency in wallet rather than a
+   * scale that does not exist. Until `amountFormatted` is on this payload the honest sentence
+   * names the asset and declines the number; the moment wallet adds it, `money` picks it up and
+   * this summary starts printing "Withdrawal of 2.5 SHARD requested." with no change here.
+   *
+   * `amount` stays declared. It is read (by `money`, which then refuses it) and it is worth
+   * keeping in `activity_records.payload`, where it is a labelled smallest-units integer rather
+   * than a decimal figure a feed would render — that is the distinction the column got wrong.
+   */
   'wallet.withdrawal.requested': {
     payloadKeys: ['userId', 'amount', 'assetCode'],
     category: 'withdrawal',
@@ -545,9 +672,10 @@ export const CLASSIFIERS = Object.freeze({
     visibility: 'user',
     userId: userFromPayload,
     summary: (event) => {
-      const value = amount(event)
+      const value = money(event)
       const code = asset(event)
-      return value && code ? `Withdrawal of ${value} ${code} requested.` : 'A withdrawal was requested.'
+      if (value && code) return `Withdrawal of ${value} ${code} requested.`
+      return code ? `A ${code} withdrawal was requested.` : 'A withdrawal was requested.'
     },
   },
   /* ── wallet's five, registered late, and every one of them keyed by something that is not a person ─
@@ -571,11 +699,13 @@ export const CLASSIFIERS = Object.freeze({
    * **No figure reaches any of these summaries, and that is measured rather than squeamish.**
    * wallet's `amount` is SMALLEST UNITS — `toWithdrawal` formats it as
    * `formatAmount(BigInt(row.amount), decimals)` (`wallet/src/withdrawals.ts:167-173`) and the
-   * payload carries the raw side of that, with no `decimals` field to divide by. `classify` reads
-   * `amount` and `price` for the record's own columns on its own account, so the number is still
-   * captured, typed, beside its `assetCode`; what a classifier must not do is render it as prose in
-   * a feed, eighteen orders of magnitude out. Same refusal as `tessera.venue.booked` and
-   * `settlement.sweep.completed`, for the same measured reason.
+   * payload carries the raw side of that, with no `decimals` field to divide by. Same refusal as
+   * `tessera.venue.booked` and `settlement.sweep.completed`, for the same measured reason — and
+   * since #199 the refusal is `money`'s rather than each classifier's, so it covers the record's
+   * `amount` COLUMN too. This block previously said the number was "still captured, typed, beside
+   * its `assetCode`" in that column and treated that as safe; `hub-web/src/pages/activity.tsx:202`
+   * renders it, so it was neither typed nor safe. The figure survives in the stored payload for
+   * the topics that declare `amount`, which is where an unrendered field belongs.
    * ------------------------------------------------------------------------------------------ */
   /**
    * Where the user's money is supposed to be sent, and the topic 243 of those 244 rows were.
@@ -764,6 +894,17 @@ export const CLASSIFIERS = Object.freeze({
       return `Your withdrawal has had no word from settlement${waited} and is being investigated. The amount is still held, and has not been returned to your balance.`
     },
   },
+  /**
+   * The figure is settlement's `row.amount.toString()` — smallest units, and no formatted twin on
+   * the payload (`settlement/src/withdrawals.ts:509-519`, `base(row)`). So the sentence names the
+   * asset and the transaction and declines the number, which is the whole of what a user needs to
+   * check it against their wallet anyway: the hash is the thing they can look up.
+   *
+   * The subject clause is a three-way rather than a two-way on purpose. "Your withdrawal was sent"
+   * is the last resort, for an event with no asset code at all; with one it says which asset left,
+   * because a user with a SHARD and an EMBER withdrawal in flight cannot tell two identical
+   * sentences apart.
+   */
   'settlement.withdrawal.completed': {
     payloadKeys: ['userId', 'amount', 'assetCode', 'transactionHash'],
     category: 'withdrawal',
@@ -771,11 +912,11 @@ export const CLASSIFIERS = Object.freeze({
     visibility: 'user',
     userId: userFromPayload,
     summary: (event) => {
-      const value = amount(event)
+      const value = money(event)
       const code = asset(event)
       const hash = text(event, 'transactionHash', 66)
-      const money = value && code ? `${value} ${code}` : 'Your withdrawal'
-      return `${money} was sent${hash ? ` in ${hash}` : ''}.`
+      const subject = value && code ? `${value} ${code}` : code ? `Your ${code} withdrawal` : 'Your withdrawal'
+      return `${subject} was sent${hash ? ` in ${hash}` : ''}.`
     },
   },
   'settlement.withdrawal.stuck': {
@@ -922,8 +1063,15 @@ export const CLASSIFIERS = Object.freeze({
    * The summary deliberately carries no amount. `row.amount` is smallest units
    * (`settlement/src/withdrawals.ts:123`, `chains.ts:432`), the payload does not say how many
    * decimals the asset has, and a rendered figure that is off by eighteen orders of magnitude is
-   * worse for the operator reading it than no figure at all. `assetCode` and `amount` still reach
-   * the record's own columns through `classify`, where they are typed and not prose.
+   * worse for the operator reading it than no figure at all.
+   *
+   * **This block used to end "`assetCode` and `amount` still reach the record's own columns
+   * through `classify`, where they are typed and not prose", and that second half was wrong.**
+   * `hub-web/src/pages/activity.tsx:202` prints `formatAmount(record.amount)` next to
+   * `record.assetCode`, so the column is rendered as money one hop later — the argument written
+   * here to keep the figure out of the prose applies to it unchanged. `assetCode` still reaches
+   * its column; the figure is kept in the stored payload, in its own units. `money` has the full
+   * reasoning and now applies it to every topic rather than to the ones somebody remembered.
    */
   'settlement.sweep.completed': {
     payloadKeys: ['chain', 'network', 'amount', 'assetCode'],
@@ -1250,8 +1398,13 @@ export const CLASSIFIERS = Object.freeze({
     type: 'market.listing_sold',
     visibility: 'user',
     userId: userFromPayload,
+    // `orders.amount` is `numeric(78,0)` (`market/src/migrations.ts:344`), so market is a
+    // smallest-units producer and `money` declines the figure. It declined it before this change
+    // too, for a different reason worth keeping written down: `orderEventPayload` emits `amount`
+    // and not `price` (`market/src/orders.ts:508-519`), so this reader has never matched a field
+    // market sends. That is micro-market's or this table's to reconcile, and it is not a scale bug.
     summary: (event) => {
-      const value = amount(event, 'price')
+      const value = money(event, 'price')
       const code = asset(event)
       return value && code ? `A listing sold for ${value} ${code}.` : 'A listing sold.'
     },
@@ -1271,8 +1424,11 @@ export const CLASSIFIERS = Object.freeze({
    * `userFromSubjectField` returns null for `service:<name>` rather than filing a machine's sale
    * in a person's feed. A null owner is made `internal` by `classify` below.
    *
-   * `amount` and `assetCode` are picked up generically by `classify`: the payload spells them with
-   * those exact names.
+   * `amount` and `assetCode` are declared because the payload spells them with those exact names.
+   * `assetCode` reaches the record's column; `amount` does not, and `money` says why — `bids.amount`
+   * is `numeric(78,0)` (`market/src/migrations.ts:402`), so the figure on this payload is a count
+   * of indivisible units and there is no `decimals` here to divide it by. It is kept in the stored
+   * payload, in its own units, rather than rendered beside a code as though it were a price.
    */
   'market.offer.made': {
     payloadKeys: ['sellerSubject', 'amount', 'assetCode'],
@@ -1281,11 +1437,10 @@ export const CLASSIFIERS = Object.freeze({
     visibility: 'user',
     userId: userFromSubjectField('sellerSubject'),
     summary: (event) => {
-      const value = amount(event)
+      const value = money(event)
       const code = asset(event)
-      return value && code
-        ? `Someone offered ${value} ${code} on your listing.`
-        : 'Someone made an offer on your listing.'
+      if (value && code) return `Someone offered ${value} ${code} on your listing.`
+      return code ? `Someone made a ${code} offer on your listing.` : 'Someone made an offer on your listing.'
     },
   },
   'community.proposal.executed': {
@@ -1768,7 +1923,10 @@ export function classify(envelope: EventEnvelope, known: boolean): Classified {
     userId,
     subjectUrn,
     summary: classifier.summary(envelope),
-    amount: amount(envelope) ?? amount(envelope, 'price'),
+    // `money`, not `amount`. This column is rendered by a frontend as a decimal figure beside
+    // `assetCode` (`hub-web/src/pages/activity.tsx:186,202`), so a number of unknown scale here is
+    // the same defect as one in the prose and not a safer place to put it. See `money`'s header.
+    amount: money(envelope) ?? money(envelope, 'price'),
     assetCode: asset(envelope),
     // A record with no owner cannot be in anybody's feed, whatever the classifier says. Without
     // this, a `settlement.withdrawal.stuck` with no user in its payload would be a `user`-visible
