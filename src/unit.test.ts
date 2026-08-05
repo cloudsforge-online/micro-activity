@@ -97,6 +97,54 @@ test('THE RULE: an unknown topic is quarantined, not dropped', () => {
   assert.match(classified.summary, /does not yet classify/)
 })
 
+test('THE RULE: a topic the REGISTRY knows and this build cannot classify is quarantined, not a crash', () => {
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  // The regression test for the production 500, and it is deliberately not a test about five
+  // wallet topics — those are classified now, and a test naming them would go green for ever the
+  // moment they were added while leaving the mechanism exactly as broken for the next five.
+  //
+  // What crashed: `known` is computed from the REGISTRY (`ingest.ts:153`), not from this build's
+  // table, so a topic `@cloudsforge/contracts-events` had registered and `classify.ts` had no
+  // entry for arrived with `known === true`, took the classified branch, and dereferenced
+  // `undefined` —
+  //
+  //     TypeError: Cannot read properties of undefined (reading 'payloadKeys')
+  //
+  // — which is a 500 on `POST /ingest`, a delivery the relay retries for ever, and a feed that
+  // stops moving. `known: true` below IS that state, expressed in the one line that produces it:
+  // a topic with no classifier, asserted to be known.
+  //
+  // This goes red again if the `TopicClassifier` cast is reinstated on the lookup. That is the
+  // point of it: the cast asserted the one thing that was false, and `noUncheckedIndexedAccess`
+  // cannot see through an assertion.
+  // ══════════════════════════════════════════════════════════════════════════════════════════
+  const { envelope } = unknownTopicDelivery('worlds.session.ended', { userId: ALICE, seconds: 90 })
+
+  // The premise, stated rather than assumed: this topic really has no classifier. If somebody
+  // classifies `worlds.session.ended` one day, this line fails loudly instead of the test quietly
+  // measuring nothing.
+  assert.ok(!CLASSIFIED_TOPICS.includes(envelope.topic), 'the fixture topic must have no classifier')
+
+  const classified = classify(envelope, true)
+
+  assert.equal(classified.category, UNCLASSIFIED)
+  assert.equal(classified.type, 'worlds.session.ended')
+  assert.equal(classified.visibility, 'internal')
+  // No owner is guessed off a schema this build has never seen, even though `userId` is sitting
+  // right there in the payload and would parse.
+  assert.equal(classified.userId, null)
+  assert.match(classified.summary, /does not yet classify/)
+  // Kept, not dropped: the row is reclassifiable from data that was never thrown away, which is
+  // the entire reason quarantine beats a 500.
+  assert.equal(classified.payload['userId'], ALICE)
+  assert.equal(classified.payload['seconds'], 90)
+  assert.equal(classified.subjectUrn, `urn:cloudsforge:worlds:session:${ALICE}`)
+
+  // And the same for `known: false`, so the two paths cannot drift into disagreeing about what a
+  // quarantined record looks like.
+  assert.deepEqual(classify(envelope, false), classified)
+})
+
 test('a record with no owner is internal, whatever its classifier says', () => {
   // `settlement.withdrawal.stuck` is keyed by chain:network and may carry no user. Without this,
   // it would be a `user`-visible record that no user can ever see, which reads on a dashboard as
@@ -676,6 +724,197 @@ test('a sweep is an internal treasury movement and lands in no user\'s feed', ()
   )
   assert.equal(withUser.userId, null)
   assert.equal(withUser.visibility, 'internal')
+})
+
+/* ------------------------------------------------------------------ wallet's five */
+
+/** A wallet id is a uuid too — the same trap as a session id, a bot id and a withdrawal id. */
+const WALLET = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab'
+
+test("a deposit address assigned reaches its owner, and a ROTATION does not read as a first assignment", () => {
+  // The payload wallet really sends (`wallet/src/deposits.ts:352-364`).
+  const assigned = classify(
+    delivery({
+      topic: 'wallet.deposit_address.assigned',
+      // Keyed `chain:network:address_key` — not a uuid at all, so `userFromKey` would have
+      // returned null and filed 243 of these in nobody's feed rather than crashing.
+      key: 'ethereum:mainnet:key-1',
+      actor: 'service:wallet',
+      payload: {
+        assignmentId: '018f0000-0000-7000-8000-0000000000ab',
+        userId: ALICE,
+        assetCode: 'SHARD',
+        chain: 'ethereum',
+        network: 'mainnet',
+        address: '0x00000000000000000000000000000000000000ab',
+        walletId: WALLET,
+        scheme: 'hd',
+        supersedesId: null,
+      },
+    }).envelope,
+    true,
+  )
+  assert.equal(assigned.category, 'deposit')
+  assert.equal(assigned.type, 'deposit.address_assigned')
+  assert.equal(assigned.userId, ALICE)
+  assert.equal(assigned.visibility, 'user')
+  assert.match(assigned.summary, /assigned to you/)
+  assert.match(assigned.summary, /0x00000000000000000000000000000000000000ab/)
+  assert.equal(assigned.subjectUrn, 'urn:cloudsforge:wallet:deposit_address:ethereum:mainnet:key-1')
+
+  // The rotation. Reading it as another assignment is how a user keeps depositing to an address
+  // that has been superseded.
+  const rotated = classify(
+    delivery({
+      topic: 'wallet.deposit_address.assigned',
+      key: 'ethereum:mainnet:key-2',
+      payload: {
+        userId: ALICE,
+        assetCode: 'SHARD',
+        chain: 'ethereum',
+        network: 'mainnet',
+        address: '0x00000000000000000000000000000000000000cd',
+        supersedesId: '018f0000-0000-7000-8000-0000000000ab',
+      },
+    }).envelope,
+    true,
+  )
+  assert.match(rotated.summary, /rotated/)
+  assert.doesNotMatch(assigned.summary, /rotated/)
+
+  // The custody key urn is the platform's signing credential and is dropped, not stored for ever.
+  const withCustody = classify(
+    delivery({
+      topic: 'wallet.deposit_address.assigned',
+      key: 'ethereum:mainnet:key-3',
+      payload: { userId: ALICE, custodyKeyUrn: 'urn:cloudsforge:wallet:custody-key:secret-one' },
+    }).envelope,
+    true,
+  )
+  assert.ok(!JSON.stringify(withCustody).includes('secret-one'), 'the custody key urn reached the record')
+})
+
+test('an external wallet link verified and revoked are the same wallet\'s story, under one filter', () => {
+  const verified = classify(
+    delivery({
+      topic: 'wallet.link.verified',
+      key: WALLET,
+      // The actor really is the user here (`wallet/src/links.ts:434`) — and the owner is still
+      // read off the payload, so nothing depends on that staying true.
+      actor: `user:${ALICE}`,
+      payload: {
+        walletId: WALLET,
+        userId: ALICE,
+        scheme: 'eip191',
+        chain: 'ethereum',
+        network: 'mainnet',
+        address: '0x00000000000000000000000000000000000000ef',
+        authorisations: ['withdraw'],
+      },
+    }).envelope,
+    true,
+  )
+  assert.equal(verified.category, 'wallet')
+  assert.equal(verified.type, 'wallet.link_verified')
+  assert.equal(verified.userId, ALICE)
+  assert.notEqual(verified.userId, WALLET, 'the wallet id is a uuid and is not a person')
+  assert.equal(verified.visibility, 'user')
+  // The address is the only part a user can actually check against the wallet they hold.
+  assert.match(verified.summary, /0x00000000000000000000000000000000000000ef/)
+  assert.match(verified.summary, /withdrawal destination/)
+
+  // ── Revocation is two facts, and the actor is not the owner ────────────────────────────────
+  const revoked = (payload: Record<string, unknown>, actor: Actor) =>
+    classify(delivery({ topic: 'wallet.link.revoked', key: WALLET, payload, actor }).envelope, true)
+
+  // §3.2: `authorisation: null` is the whole disconnect, and it is revoked BY SUPPORT here.
+  const disconnected = revoked(
+    { walletId: WALLET, userId: ALICE, authorisation: null, remaining: [] },
+    'operator:support',
+  )
+  assert.equal(disconnected.category, 'wallet')
+  assert.equal(disconnected.type, 'wallet.link_revoked')
+  // The account holder's news, not the support agent's. Reading the actor here would file it in
+  // a feed the person it happened to cannot see.
+  assert.equal(disconnected.userId, ALICE)
+  assert.match(disconnected.summary, /disconnected/)
+
+  // One permission off a link that still stands is a different entry, with a different type.
+  const narrowed = revoked(
+    { walletId: WALLET, userId: ALICE, authorisation: 'withdraw', remaining: ['receive'] },
+    `user:${ALICE}`,
+  )
+  assert.equal(narrowed.type, 'wallet.authorisation_revoked')
+  assert.notEqual(narrowed.type, disconnected.type)
+  assert.match(narrowed.summary, /"withdraw"/)
+  assert.match(narrowed.summary, /1 permission left/)
+  assert.doesNotMatch(narrowed.summary, /disconnected/)
+
+  // A producer that stopped sending the field falls to the MORE serious reading, never the softer
+  // one — the same way an unrecognised session revocation reason does.
+  assert.equal(revoked({ userId: ALICE }, 'system').type, 'wallet.link_revoked')
+})
+
+test("a refunded withdrawal and a stuck one say opposite things about where the money is", () => {
+  const refunded = classify(
+    delivery({
+      topic: 'wallet.withdrawal.refunded',
+      key: WITHDRAWAL,
+      payload: {
+        withdrawalId: WITHDRAWAL,
+        userId: ALICE,
+        assetCode: 'SHARD',
+        amount: '2500000000000000000',
+        reason: 'chain_rejected: nonce too low from 0x00000000000000000000000000000000000000ff',
+      },
+    }).envelope,
+    true,
+  )
+  assert.equal(refunded.category, 'withdrawal')
+  assert.equal(refunded.type, 'withdrawal.refunded')
+  assert.equal(refunded.userId, ALICE)
+  assert.notEqual(refunded.userId, WITHDRAWAL)
+  assert.equal(refunded.visibility, 'user')
+  assert.match(refunded.summary, /returned to your balance/)
+
+  // wallet's `amount` is smallest units (`wallet/src/withdrawals.ts:167-173`) with no decimals on
+  // the payload: the typed column keeps it, the prose does not print it.
+  assert.equal(refunded.amount, '2500000000000000000')
+  assert.doesNotMatch(refunded.summary, /2500000000000000000/)
+
+  // `reason` is `${err.code}: ${err.message}` and carries a destination address on a chain error.
+  // Not declared, so it is dropped at ingest rather than kept for ever in a column erasure of the
+  // third party cannot reach.
+  assert.deepEqual(Object.keys(refunded.payload).sort(), ['__redacted', 'userId'])
+  assert.ok(!JSON.stringify(refunded).includes('0x00000000000000000000000000000000000000ff'))
+
+  // ── The stuck one. The money has NOT come back, and the entry must not read as though it has ──
+  const stuck = classify(
+    delivery({
+      topic: 'wallet.withdrawal.stuck',
+      key: WITHDRAWAL,
+      actor: 'service:wallet',
+      payload: { withdrawalId: WITHDRAWAL, userId: ALICE, stuckMinutes: 60 },
+    }).envelope,
+    true,
+  )
+  assert.equal(stuck.category, 'withdrawal')
+  assert.equal(stuck.userId, ALICE)
+  // Always user-visible, unlike settlement's: `sweepStuck` selects `user_id` off the row, so this
+  // topic always names somebody. A balance a user cannot spend and cannot explain is the failure.
+  assert.equal(stuck.visibility, 'user')
+  assert.match(stuck.summary, /still held/)
+  assert.doesNotMatch(stuck.summary, /returned to your balance$/)
+  assert.match(stuck.summary, /60 minutes/)
+
+  // THE VERDICT ON THE DUPLICATE NAME. Both `wallet.withdrawal.stuck` and
+  // `settlement.withdrawal.stuck` are registered and they are not one fact: settlement's is keyed
+  // `chain:network` and means a BROADCAST transaction has not confirmed, wallet's is keyed
+  // `withdrawal_id` and means settlement never said anything at all. Distinct types, because the
+  // frontend switches on `type` and an operator has to be able to tell them apart.
+  assert.equal(stuck.type, 'withdrawal.stuck_no_settlement')
+  assert.equal(CLASSIFIERS['settlement.withdrawal.stuck'].type, 'withdrawal.stuck')
+  assert.notEqual(stuck.type, CLASSIFIERS['settlement.withdrawal.stuck'].type)
 })
 
 /* ------------------------------------------------------------------ delivery parsing */

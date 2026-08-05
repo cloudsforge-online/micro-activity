@@ -290,6 +290,19 @@ function isRefundable(envelope: EventEnvelope): boolean {
   return payloadOf(envelope)['refundable'] === true
 }
 
+/**
+ * Whether a revocation took the whole external wallet link, or one permission off it.
+ *
+ * `wallet/src/links.ts:499` types the field `Authorisation | null` and §3.2 spells out what the
+ * `null` means: "'disconnect a wallet' is revoking all of them plus the link". So an absent or
+ * null `authorisation` is the WHOLE link, and it is the more serious of the two — which is the
+ * right way round for a field that may also be missing because a producer stopped sending it.
+ */
+function revokedWholeLink(envelope: EventEnvelope): boolean {
+  const value = payloadOf(envelope)['authorisation']
+  return typeof value !== 'string' || value.length === 0
+}
+
 /* ------------------------------------------------------------------ the table */
 
 /**
@@ -535,6 +548,220 @@ export const CLASSIFIERS = Object.freeze({
       const value = amount(event)
       const code = asset(event)
       return value && code ? `Withdrawal of ${value} ${code} requested.` : 'A withdrawal was requested.'
+    },
+  },
+  /* ── wallet's five, registered late, and every one of them keyed by something that is not a person ─
+   *
+   * `micro-wallet` emitted these five against a registry that carried three of its eight topics, so
+   * `validateEnvelope` refused them and the relay set them aside — **244 rows on the mainnet
+   * estate**, per the registry's own note. `micro-contracts` 5377269 registered them; this table
+   * had no entry for any of them, which is what crashed `classify` (see `CLASSIFIER_TABLE`). The
+   * structural repair above means a sixth would quarantine instead of throwing; these five are here
+   * so they land somewhere a person can read rather than in the quarantine.
+   *
+   * **All five are `userFromPayload`, and that is the whole of the trap.** Four are keyed by a
+   * `wallet_id` or a `withdrawal_id`, both `uuid` columns (`wallet/src/migrations.ts:364-365`), so
+   * `userFromKey` does not fail on them — it returns a well-formed, queryable, WRONG id, exactly as
+   * it did for `identity.session.created` in production. The fifth is keyed
+   * `chain:network:address_key`, which is not a uuid at all. Every one of the five names the user on
+   * its payload, and none may read the ACTOR: `wallet.link.revoked`'s actor is `input.by`
+   * (`wallet/src/links.ts:534`), which is an OPERATOR when support disconnects a wallet, and
+   * `deposit_address.assigned` and `withdrawal.stuck` are emitted by jobs as `service:wallet`.
+   *
+   * **No figure reaches any of these summaries, and that is measured rather than squeamish.**
+   * wallet's `amount` is SMALLEST UNITS — `toWithdrawal` formats it as
+   * `formatAmount(BigInt(row.amount), decimals)` (`wallet/src/withdrawals.ts:167-173`) and the
+   * payload carries the raw side of that, with no `decimals` field to divide by. `classify` reads
+   * `amount` and `price` for the record's own columns on its own account, so the number is still
+   * captured, typed, beside its `assetCode`; what a classifier must not do is render it as prose in
+   * a feed, eighteen orders of magnitude out. Same refusal as `tessera.venue.booked` and
+   * `settlement.sweep.completed`, for the same measured reason.
+   * ------------------------------------------------------------------------------------------ */
+  /**
+   * Where the user's money is supposed to be sent, and the topic 243 of those 244 rows were.
+   *
+   * `deposit`, not `wallet`: it is the first half of the deposit story whose second half is
+   * `wallet.deposit.confirmed`, and a user reading "where did my deposit go" should find the
+   * address they were given under the same filter as the credit that followed it. It is also the
+   * record an operator needs for "which address did we give this person, and when" — the question
+   * the registry's note says had nothing to read.
+   *
+   * `supersedesId` decides the sentence, and it is a real distinction rather than a nicety: an
+   * address ASSIGNED is somewhere to send money to, an address ROTATED means the previous one
+   * should not be used again (`wallet/src/deposits.ts:345`, `supersedes_id`). A user who reads the
+   * two as one event keeps depositing to a superseded address.
+   *
+   * `walletId`, `assignmentId`, `scheme` and `custodyKeyUrn` are not declared. `custodyKeyUrn` is
+   * the one that matters: it names the custody key the platform signs with, and it is not
+   * something this service has any use for or any business keeping for ever.
+   */
+  'wallet.deposit_address.assigned': {
+    payloadKeys: ['userId', 'assetCode', 'chain', 'network', 'address', 'supersedesId'],
+    category: 'deposit',
+    type: 'deposit.address_assigned',
+    visibility: 'user',
+    // Keyed `chain:network:address_key` (`wallet/src/deposits.ts:353`), which is not a user and not
+    // a uuid; the payload names the user (`:356`).
+    userId: userFromPayload,
+    summary: (event) => {
+      // Every declared field is read before anything branches. The allowlist test drives this
+      // function against a payload where every key is `undefined`, and a key read only inside a
+      // taken branch would look undeclared-but-unread on the day the branch is not taken.
+      const code = asset(event)
+      const chain = text(event, 'chain', 24)
+      const network = text(event, 'network', 24)
+      const address = text(event, 'address', 64)
+      const supersedes = payloadOf(event)['supersedesId']
+      const what = code ? `${code} deposit address` : 'deposit address'
+      const where = chain ? ` on ${chain}${network ? ` ${network}` : ''}` : ''
+      const opening =
+        typeof supersedes === 'string' && supersedes.length > 0
+          ? `Your ${what}${where} was rotated. Use the new one from now on`
+          : `A ${what} was assigned to you${where}`
+      return address ? `${opening}: ${address}.` : `${opening}.`
+    },
+  },
+  /**
+   * A user proved they hold the key to an external wallet — which is what makes it a place money
+   * may leave to.
+   *
+   * `wallet`, not `security`, and the argument is the one this file already made for putting
+   * sign-IN and sign-OUT both under `security`: `wallet.wallet.created` files the linking of an
+   * external wallet under `wallet`, so filing its verification and its revocation anywhere else
+   * would mean the three events of one wallet's life cannot be read together under one filter.
+   *
+   * The address is in the sentence deliberately. The failure this event guards against is a link
+   * the user did not make, and "an external wallet was verified" is not something anybody can check
+   * — an address they can compare against the one they hold is.
+   *
+   * `scheme` and `authorisations` are not declared. `authorisations` is the permission list, which
+   * the revocation event below reports on when it changes; holding a copy of it here would be a
+   * second, ageing answer to a question the wallet service owns.
+   */
+  'wallet.link.verified': {
+    payloadKeys: ['userId', 'chain', 'network', 'address'],
+    category: 'wallet',
+    type: 'wallet.link_verified',
+    visibility: 'user',
+    // NOT userFromKey: keyed by WALLET id (`wallet/src/links.ts:425`), a uuid. NOT userFromActor
+    // either, though the actor happens to be `user:<userId>` here (`:434`) — see the header on
+    // `userFromActor`; the payload states the owner, so nothing has to depend on that coincidence.
+    userId: userFromPayload,
+    summary: (event) => {
+      const chain = text(event, 'chain', 24)
+      const network = text(event, 'network', 24)
+      const address = text(event, 'address', 64)
+      const where = chain ? ` on ${chain}${network ? ` ${network}` : ''}` : ''
+      const which = address ? ` (${address})` : ''
+      return `You proved you hold the key to an external wallet${where}${which}. It can now be used as a withdrawal destination.`
+    },
+  },
+  /**
+   * The mirror of the above, and it is two facts rather than one.
+   *
+   * `wallet/src/links.ts:499-527` and §3.2: `authorisation: null` is "disconnect a wallet" — every
+   * permission revoked AND the link itself closed, in one transaction — while a named
+   * `authorisation` removes one permission and leaves the link standing. "This wallet is no longer
+   * yours to withdraw to" and "this wallet may no longer do one particular thing" are not one entry
+   * with a softer adjective, and `type` is a function for the same reason
+   * `identity.session.revoked`'s is: the frontend switches on it to choose the emphasis.
+   *
+   * **Not `userFromActor`, and this is the topic that proves why the rule exists.** The actor is
+   * `input.by` (`:534`), which is whoever pressed the button — an operator revoking a compromised
+   * link, or another service. The record belongs to the account holder either way, and reading the
+   * actor here would file a support action in the support agent's feed and nowhere else.
+   */
+  'wallet.link.revoked': {
+    payloadKeys: ['userId', 'authorisation', 'remaining'],
+    category: 'wallet',
+    type: (event) => (revokedWholeLink(event) ? 'wallet.link_revoked' : 'wallet.authorisation_revoked'),
+    visibility: 'user',
+    // Keyed by WALLET id (`wallet/src/links.ts:530`), a uuid; the payload names the user (`:532`).
+    userId: userFromPayload,
+    summary: (event) => {
+      const authorisation = text(event, 'authorisation', 32)
+      const remaining = payloadOf(event)['remaining']
+      const left = Array.isArray(remaining) ? remaining.length : null
+      if (authorisation === null) {
+        return 'An external wallet was disconnected from your account. It can no longer be used as a withdrawal destination.'
+      }
+      const rest =
+        left === null
+          ? ''
+          : left === 0
+            ? ' It has no permissions left.'
+            : ` It has ${left} permission${left === 1 ? '' : 's'} left.`
+      return `The "${authorisation}" permission was removed from an external wallet.${rest}`
+    },
+  },
+  /**
+   * **The user is owed this one**, in the registry's own words, and until now nobody was told.
+   *
+   * `settlement.outbound.failed` above says a failed withdrawal is currently in nobody's timeline,
+   * because settlement's payload carries no `userId`. This is the other half of that sentence and
+   * the half that can be delivered: `wallet/src/withdrawals.ts:637-646` emits `userId` off the row,
+   * on the branch where the reservation has ALREADY been released back into the spendable balance
+   * (`:630`, `deps.ledger.release`). The money is back before this event exists, so the entry is a
+   * statement of fact rather than a promise.
+   *
+   * **`reason` is not declared, and that is a decision rather than an oversight.** It is
+   * `refunded.failureReason`, which is written as `` `${err.code}: ${err.message}` ``
+   * (`wallet/src/withdrawals.ts:403`) — an unbounded string from whatever failed, which on a chain
+   * error routinely carries a destination address. That is a third party's identifier arriving in a
+   * column this service keeps for ever, and `redact.ts`'s header is explicit that an over-declared
+   * key is one that party's own erasure can never reach. The user does not need it and the operator
+   * has it at the source.
+   */
+  'wallet.withdrawal.refunded': {
+    payloadKeys: ['userId'],
+    category: 'withdrawal',
+    type: 'withdrawal.refunded',
+    visibility: 'user',
+    // NOT userFromKey: keyed by WITHDRAWAL id (`wallet/src/withdrawals.ts:639`), a uuid.
+    userId: userFromPayload,
+    summary: () =>
+      'Your withdrawal could not be sent, and the amount that was held for it has been returned to your balance.',
+  },
+  /**
+   * A DIFFERENT FACT from `settlement.withdrawal.stuck`, which is why both names stay.
+   *
+   * The registry carries both and they are not two spellings of one event:
+   *
+   *   * `settlement.withdrawal.stuck` — settlement's, keyed `chain:network`. An outbound
+   *     transaction was BROADCAST and has not confirmed. Classified above as `withdrawal.stuck`,
+   *     and it frequently has no user on it, which is why it is demoted to internal so often.
+   *   * `wallet.withdrawal.stuck` — this one, wallet's, keyed `withdrawal_id`. A withdrawal sat in
+   *     `queued` or `settling` past `WALLET_WITHDRAWAL_STUCK_MINUTES` with **no word from
+   *     settlement at all** (`wallet/src/withdrawals.ts:663-690`). Nothing is known to have been
+   *     broadcast; it may never have left. It always names the user, because `sweepStuck` selects
+   *     `user_id` off the row.
+   *
+   * So the `type` differs too. Collapsing them onto `withdrawal.stuck` would hand the frontend one
+   * icon for "we are waiting on a chain" and "we have lost track of your withdrawal", and would make
+   * the operator query "which of these never got as far as a transaction" unanswerable from the
+   * feed. `settlement.withdrawal.stuck` keeps the name it already has, in already-written rows.
+   *
+   * `user`-visible, and unlike settlement's it will actually stay that way. The money is reserved
+   * and unspendable, and a balance a user cannot spend and cannot explain is named in wallet's own
+   * comment as forge-pay's failure mode. The summary says the amount is still held, because the
+   * one thing that must not happen is a user reading this and believing it has been returned —
+   * `wallet.withdrawal.refunded` above is the event that means that, and it is a different entry.
+   */
+  'wallet.withdrawal.stuck': {
+    payloadKeys: ['userId', 'stuckMinutes'],
+    category: 'withdrawal',
+    type: 'withdrawal.stuck_no_settlement',
+    visibility: 'user',
+    // NOT userFromKey: keyed by WITHDRAWAL id (`wallet/src/withdrawals.ts:685`), a uuid. NOT the
+    // actor either — this is emitted by a sweep job as `service:wallet` (`:692`).
+    userId: userFromPayload,
+    summary: (event) => {
+      const minutes = payloadOf(event)['stuckMinutes']
+      const waited =
+        typeof minutes === 'number' && Number.isInteger(minutes) && minutes > 0
+          ? ` for more than ${minutes} minutes`
+          : ''
+      return `Your withdrawal has had no word from settlement${waited} and is being investigated. The amount is still held, and has not been returned to your balance.`
     },
   },
   'settlement.withdrawal.completed': {
@@ -1458,41 +1685,81 @@ export function subjectUrnFor(producer: ProducerService, aggregate: string, key:
 }
 
 /**
+ * **The table as a LOOKUP, which is a different type from the table as a literal.**
+ *
+ * `CLASSIFIERS` is an object literal, so `CLASSIFIERS[topic]` is typed from the keys that are
+ * written down — it is `TopicClassifier`, never `TopicClassifier | undefined`, because
+ * `noUncheckedIndexedAccess` widens an INDEX SIGNATURE and this is not one. That is exactly right
+ * for the compile-time guarantee (`satisfies` below the table) and exactly wrong for the runtime
+ * one, and the gap between the two is a defect that reached production:
+ *
+ * > `TypeError: Cannot read properties of undefined (reading 'payloadKeys')`
+ *
+ * `micro-contracts` registered five wallet topics this build had no classifier for. `known` is
+ * computed from the REGISTRY (`ingest.ts:153`), so those five took the classified branch,
+ * `CLASSIFIERS[topic]` was `undefined`, and the next line threw — `POST /ingest` 500s, the relay
+ * retries for ever, and the feed stops. The old line read
+ * `const classifier: TopicClassifier = CLASSIFIERS[envelope.topic]`, and the annotation was a bare
+ * cast: it asserted the very thing that was false.
+ *
+ * The two builds are only ever in step when they are deployed together, which twenty-two
+ * separately deployed services are not. So the lookup is typed `Partial` — an honest statement
+ * that at RUNTIME a topic may have no entry — and the compiler now forces the `undefined` branch
+ * to be handled rather than assumed away. Nothing is weakened: the table is still declared
+ * `satisfies Readonly<Record<TopicName, TopicClassifier>>`, so a missing classifier is still a
+ * compile error in this repository. This is what happens when that error is not the one you get,
+ * because the registry moved in a package you consume.
+ */
+const CLASSIFIER_TABLE: Readonly<Partial<Record<TopicName, TopicClassifier>>> = CLASSIFIERS
+
+/**
+ * The quarantine record: written, kept, and owned by nobody.
+ *
+ * Losing an event silently is worse than filing it badly — the event is gone and nothing records
+ * that it ever arrived. So the payload is kept, the topic is recorded, and the row can be
+ * reclassified later from data that was never thrown away.
+ */
+function quarantine(envelope: EventEnvelope, subjectUrn: string): Classified {
+  // `null` is the quarantine rule, not an empty allowlist: there is no declaration to check
+  // against, so the payload keeps its structure and its identifiers and loses its prose. See
+  // `redact.ts` — dropping it outright would destroy the reclassification the quarantine exists
+  // for, and keeping it verbatim is the defect this whole path was.
+  const redaction = redactPayload(envelope.payload, null)
+  return {
+    category: UNCLASSIFIED,
+    type: envelope.topic,
+    // Not guessed. A user id read out of an unrecognised payload is a guess about a schema
+    // this build has never seen, and a wrong one puts another user's event in a feed.
+    userId: null,
+    subjectUrn,
+    summary: `An event this build does not yet classify: ${envelope.topic}.`,
+    amount: null,
+    assetCode: null,
+    visibility: 'internal',
+    payload: redaction.payload,
+    redactedKeys: redaction.dropped,
+  }
+}
+
+/**
  * Classify a delivered event.
  *
- * `known` is false when the topic parsed and validated but is not in this build's registry — a
- * consumer that is behind its producers. The record is still written, in quarantine, because
- * losing an event silently is worse than filing it badly: the payload is kept, the topic is
- * recorded, and the row can be reclassified from data that was never thrown away.
+ * `known` is false when the topic parsed and validated but is not in this build's REGISTRY — a
+ * consumer that is behind its producers. It is not the only way to be behind, and treating it as
+ * the only way is what crashed this service: a topic the registry carries and this TABLE does not
+ * is the same situation one package later, and it takes the same path. Both quarantine.
  */
 export function classify(envelope: EventEnvelope, known: boolean): Classified {
   const parsed = parseTopicName(envelope.topic)
   const aggregate = parsed.ok ? parsed.value.aggregate : 'unknown'
   const subjectUrn = subjectUrnFor(envelope.producer, aggregate, envelope.key)
 
-  if (!known) {
-    // `null` is the quarantine rule, not an empty allowlist: there is no declaration to check
-    // against, so the payload keeps its structure and its identifiers and loses its prose. See
-    // `redact.ts` — dropping it outright would destroy the reclassification the quarantine exists
-    // for, and keeping it verbatim is the defect this whole path was.
-    const redaction = redactPayload(envelope.payload, null)
-    return {
-      category: UNCLASSIFIED,
-      type: envelope.topic,
-      // Not guessed. A user id read out of an unrecognised payload is a guess about a schema
-      // this build has never seen, and a wrong one puts another user's event in a feed.
-      userId: null,
-      subjectUrn,
-      summary: `An event this build does not yet classify: ${envelope.topic}.`,
-      amount: null,
-      assetCode: null,
-      visibility: 'internal',
-      payload: redaction.payload,
-      redactedKeys: redaction.dropped,
-    }
-  }
+  // One condition, asking the question that can actually be answered here: can THIS BUILD classify
+  // this event? `known` alone asks whether the registry has heard of it, which is a fact about a
+  // dependency rather than about this file.
+  const classifier = known ? CLASSIFIER_TABLE[envelope.topic] : undefined
+  if (classifier === undefined) return quarantine(envelope, subjectUrn)
 
-  const classifier: TopicClassifier = CLASSIFIERS[envelope.topic]
   const userId = classifier.userId(envelope)
   const redaction = redactPayload(envelope.payload, classifier.payloadKeys)
   return {

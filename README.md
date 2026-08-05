@@ -65,7 +65,11 @@ Replies: `201 recorded`, `200 duplicate`, `200 erased`. A redelivery is **200, n
 producer doing exactly what at-least-once delivery requires of it, and an error answer would make the
 relay retry for ever (`:387-391`).
 
-### What happens to a topic this build has never heard of
+### What happens to a topic this build cannot classify
+
+There are two ways to be behind a producer and they take the same path: a topic this build's
+**registry** has never heard of, and a topic the registry carries but `src/classify.ts` has no entry
+for. The second is the one that used to crash — see "Who calls it" below.
 
 It is filed, never dropped. `parseDelivery` (`src/ingest.ts:114-148`) recognises a well-formed but
 unregistered topic and validates only the minimum a quarantine row needs — id, key, `occurredAt`,
@@ -235,11 +239,17 @@ nobody.
 
 ### Who calls it
 
-Every service that publishes a registered topic, via its outbox relay. Eighteen topics are classified
-(`src/classify.ts:128-320`) and the mapping is enforced at compile time —
+Every service that publishes a registered topic, via its outbox relay. All 61 registered topics are
+classified (`src/classify.ts`) and the mapping is enforced at compile time —
 `satisfies Readonly<Record<TopicName, TopicClassifier>>` means adding a topic to `contracts-events`
 without adding a row here is a **type error in this repository**, which is the property worth having.
 The alternative is a topic that quietly lands in `unclassified` for six months.
+
+That guarantee holds when the two are compiled together, which is exactly when it is least needed.
+When `contracts-events` moves ahead of a deployed build of this service, the type error is not the
+error you get — so the *runtime* lookup is typed `Partial` (`CLASSIFIER_TABLE` in `src/classify.ts`)
+and a registered topic with no local classifier quarantines. It used to dereference `undefined` and
+500, which is the defect micro-org#198 records.
 
 Seven of the sixteen categories — `transfer` beyond ledger entries, `conversion`, `ownership`,
 `trading`, `reward`, `community`, `api` — have no producer yet. The set describes what the feed
