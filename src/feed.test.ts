@@ -53,7 +53,7 @@ const BASE = Date.UTC(2026, 6, 30, 12, 0, 0)
 /**
  * A decimal figure as the 18-decimal integer wallet would put beside it.
  *
- * Fixtures here send the PAIR wallet really sends (`wallet/src/deposits.ts:768-770`), not a bare
+ * Fixtures here send the PAIR wallet really sends (`wallet/src/deposits.ts`), not a bare
  * decimal `amount` — since micro-org#199 the `amount` column is filled from `amountFormatted` for
  * a smallest-units producer, so a fixture with only the decimal half would be testing a payload
  * wallet has never emitted and would quietly assert null.
@@ -175,7 +175,7 @@ test('settlement\'s three, through the real ingest path, land where they belong'
   // and that version of the test PASSED with the classifier deliberately broken to
   // `userFromPayload`, because a reader looking for a field that is absent returns null either way.
   // A guard that cannot fail. The shape sent here is the one settlement may reasonably adopt
-  // tomorrow (the row has `userId` at settlement/src/outbound.ts:230, and the wide event already
+  // tomorrow (the row has `userId` at settlement/src/outbound.ts, and the wide event already
   // carries it), which is exactly the day the double-post would appear; sending it now is what
   // makes `() => null` a tested refusal rather than a coincidence.
   await send(
@@ -272,7 +272,7 @@ test('trade\'s one and devplatform\'s two, through the real ingest path, land wh
     `user:${ALICE}`,
     3,
   )
-  // The organisation-erasure path (devplatform/src/server.ts:1575): every live key revoked at once,
+  // The organisation-erasure path (devplatform/src/server.ts): every live key revoked at once,
   // as `service:identity`. No user is on that envelope, so the record is the operator's and nobody
   // is notified — the live gap, recorded here as a fact rather than as a hope.
   await send(
@@ -345,7 +345,7 @@ test('the feed filters by category and by product', { skip }, async () => {
     parseDelivery(
       delivery({
         // Identity's REAL envelope: keyed by the SESSION id, user in the payload
-        // (`identity/src/sessions.ts:198-205`). This fixture used to key by ALICE — a shape the
+        // (`identity/src/sessions.ts`). This fixture used to key by ALICE — a shape the
         // producer never sends — which is why the suite stayed green while every real sign-in
         // was attributed to its session id and appeared in nobody's feed.
         topic: 'identity.session.created',

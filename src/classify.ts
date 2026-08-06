@@ -71,7 +71,7 @@ interface TopicClassifier {
    * because a stolen refresh token was replayed", and `type` is the field a frontend switches on
    * to choose an icon and an emphasis. One static type for both would render an account takeover
    * with the same chrome as a sign-out. `notify` already refuses to treat them alike — a critical
-   * notification fires for every reason except `signed_out` (notify/src/catalogue.ts:258) — and a
+   * notification fires for every reason except `signed_out` (notify/src/catalogue.ts) — and a
    * timeline that collapses the distinction disagrees with the notification the user just got.
    */
   readonly type: string | ((envelope: EventEnvelope) => string)
@@ -159,17 +159,17 @@ function asset(envelope: EventEnvelope, field = 'assetCode'): string | null {
  * default safe, rather than trusting the next person to add a line.
  *
  *   - `wallet`      — `toWithdrawal` stores `amount: row.amount` and separately computes
- *                     `formatAmount(BigInt(row.amount), decimals)` (`wallet/src/withdrawals.ts:167-173`);
- *                     `wallet/src/deposits.ts:768-770` emits the same pair. The raw side is the
+ *                     `formatAmount(BigInt(row.amount), decimals)` (`wallet/src/withdrawals.ts`);
+ *                     `wallet/src/deposits.ts` emits the same pair. The raw side is the
  *                     one named `amount`.
  *   - `settlement`  — `units()` refuses anything but `/^\d+$/` and calls it "a decimal string of
- *                     smallest units" (`settlement/src/withdrawals.ts:120-126`); `base(row)` puts
- *                     `row.amount.toString()` on every outbound payload (`withdrawals.ts:509-519`).
- *   - `ledger`      — `postings.amount` is `numeric(78,0)` (`ledger/src/migrations.ts:219`), an
+ *                     smallest units" (`settlement/src/withdrawals.ts`); `base(row)` puts
+ *                     `row.amount.toString()` on every outbound payload (`withdrawals.ts`).
+ *   - `ledger`      — `postings.amount` is `numeric(78,0)` (`ledger/src/migrations.ts`), an
  *                     integer column with no fractional part to hold a decimal in.
  *   - `market`      — `orders.amount` and `bids.amount` are `numeric(78,0)` too
- *                     (`market/src/migrations.ts:344,402`), and `orderEventPayload` emits
- *                     `order.amount.toString()` (`market/src/orders.ts:508-519`).
+ *                     (`market/src/migrations.ts,402`), and `orderEventPayload` emits
+ *                     `order.amount.toString()` (`market/src/orders.ts`).
  *
  * Adding a producer here is a one-line change and removing one needs the same kind of citation.
  * ═════════════════════════════════════════════════════════════════════════════════════════════ */
@@ -203,9 +203,9 @@ const SMALLEST_UNIT_PRODUCERS: ReadonlySet<ProducerService> = new Set<ProducerSe
  *
  * Two comments below used to say the figure "still reaches the record's own columns, where it is
  * typed and not prose", and treated the column as a safe place to put a number of unknown scale.
- * **That was wrong, and there is a file that proves it:** `hub-web/src/pages/activity.tsx:186,202`
+ * **That was wrong, and there is a file that proves it:** `hub-web/src/pages/activity.tsx,202`
  * renders `formatAmount(record.amount)` immediately followed by `record.assetCode`, and
- * `hub-web/src/lib/format.ts:109` is a DECIMAL formatter with a thousands separator. So a
+ * `hub-web/src/lib/format.ts` is a DECIMAL formatter with a thousands separator. So a
  * smallest-units integer in that column is not typed data at rest — it is
  * "2,500,000,000,000,000,000 SHARD" in the same feed row as the summary, one hop later. The
  * column is prose with extra steps, so it gets the prose rule.
@@ -329,7 +329,7 @@ function userFromSubjectKey(envelope: EventEnvelope): string | null {
  *
  * `community.vote.cast` is why this exists and it is a trap worth naming: the payload's owner
  * field is called `voter`, not `userId`, and it holds `user:<uuid>` because community's whole
- * membership model is subject-keyed (`community/src/server.ts:875` passes `caller.subject`). So
+ * membership model is subject-keyed (`community/src/server.ts` passes `caller.subject`). So
  * `userFromPayload` finds nothing, and a reader that expected a bare uuid under `voter` would
  * also find nothing — a vote receipt in nobody's feed, which is the one thing the topic exists
  * to deliver.
@@ -341,9 +341,9 @@ function userFromSubjectField(field: string): (envelope: EventEnvelope) => strin
 /**
  * How a session ended, as the user should read it.
  *
- * The four keys are every value identity actually passes — `identity/src/server.ts:993` (password
- * changed), `:1065` (password reset), `:1128` (signed out everywhere) and `:1137`/
- * `sessions.ts:389` (signed out). The fifth case has no constant: `server.ts:892` burns a refresh
+ * The four keys are every value identity actually passes — `identity/src/server.ts` (password
+ * changed) (password reset) (signed out everywhere) and/
+ * `sessions.ts` (signed out). The fifth case has no constant: `server.ts` burns a refresh
  * family when a stolen token is replayed, and whatever reason it carries must fall through to the
  * alarming sentence rather than to a reassuring one.
  *
@@ -371,7 +371,7 @@ function revocationReason(envelope: EventEnvelope): string {
  * Whether a failed withdrawal's money is coming back.
  *
  * `=== true` and not a truthiness test, and not a default of `true`, because this reader must
- * agree with the consumer that actually moves the money: `wallet/src/server.ts:873` writes
+ * agree with the consumer that actually moves the money: `wallet/src/server.ts` writes
  * `refundable: payload['refundable'] === true` for the stated reason that refunding a payment
  * which really landed pays the user twice. A timeline that said "the money is on its way back"
  * where wallet held the funds and paged an operator would be a feed entry contradicting the
@@ -384,7 +384,7 @@ function isRefundable(envelope: EventEnvelope): boolean {
 /**
  * Whether a revocation took the whole external wallet link, or one permission off it.
  *
- * `wallet/src/links.ts:499` types the field `Authorisation | null` and §3.2 spells out what the
+ * `wallet/src/links.ts` types the field `Authorisation | null` and §3.2 spells out what the
  * `null` means: "'disconnect a wallet' is revoking all of them plus the link". So an absent or
  * null `authorisation` is the WHOLE link, and it is the more serious of the two — which is the
  * right way round for a field that may also be missing because a producer stopped sending it.
@@ -416,7 +416,7 @@ export const CLASSIFIERS = Object.freeze({
    *
    * Registered in `contracts-events` while this file was open. Its payload is
    * `{ userId, handle, email, expiresAt, linkable, verifyUrl? }`
-   * (`identity/src/emailVerification.ts:172-185`) and two of those fields are ones this table must
+   * (`identity/src/emailVerification.ts`) and two of those fields are ones this table must
    * never hold: `email` is a direct identifier, and `verifyUrl` is a **live single-use credential**.
    * Identity's own header accepts putting the link on the bus because `notify` has to send it and
    * prunes what it stores; activity subscribes to every topic under AD-11, needs neither field for
@@ -424,7 +424,7 @@ export const CLASSIFIERS = Object.freeze({
    * nothing deleted. `payloadKeys` is `['linkable']` and that is the entire difference.
    *
    * `account`, not `security`. This is the account not yet being finished — `notify` renders it as
-   * `account.verify_email` (`notify/src/catalogue.ts:659`) — and a user reading their timeline for
+   * `account.verify_email` (`notify/src/catalogue.ts`) — and a user reading their timeline for
    * "what happened to my account" should find it beside the registration it belongs to.
    *
    * The summary never names the address and never carries the link. `linkable` is the field that
@@ -437,7 +437,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'account',
     type: 'account.email_verification_requested',
     visibility: 'user',
-    // Keyed by user_id, as the registry says and as the emit does (`emailVerification.ts:171`).
+    // Keyed by user_id, as the registry says and as the emit does (`emailVerification.ts`).
     userId: userFromKey,
     summary: (event) =>
       payloadOf(event)['linkable'] === true
@@ -458,7 +458,7 @@ export const CLASSIFIERS = Object.freeze({
     type: 'security.session_created',
     visibility: 'user',
     // userFromPayload, NOT userFromKey: identity keys this event by SESSION id
-    // (`identity/src/sessions.ts:199`) and names the user in the payload. The key IS a uuid, so
+    // (`identity/src/sessions.ts`) and names the user in the payload. The key IS a uuid, so
     // userFromKey happily returned the session id as the "user" and every sign-in landed in
     // nobody's feed — silently, because a wrong uuid queries as cleanly as a right one. Found by
     // composing identity next to this service, not by either suite.
@@ -488,10 +488,10 @@ export const CLASSIFIERS = Object.freeze({
       revocationReason(event) === 'signed_out' ? 'security.signed_out' : 'security.session_revoked',
     visibility: 'user',
     // userFromPayload, NOT userFromKey. The registry keys this by SESSION id
-    // (contracts/packages/events/src/index.ts:267, identity/src/sessions.ts:394) and a session id
+    // (contracts/packages/events/src/index.ts, identity/src/sessions.ts) and a session id
     // IS a uuid, so userFromKey would return it as the "user" and every revocation would land in
     // nobody's feed — silently, exactly as identity.session.created did. The payload names the
-    // user (`identity/src/sessions.ts:397`).
+    // user (`identity/src/sessions.ts`).
     userId: userFromPayload,
     summary: (event) => REVOCATION_SUMMARIES[revocationReason(event)] ?? UNKNOWN_REVOCATION,
   },
@@ -500,7 +500,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'security',
     type: 'security.device_added',
     visibility: 'user',
-    // Same repair as session.created: identity keys this by DEVICE id (`identity/src/sessions.ts:184`)
+    // Same repair as session.created: identity keys this by DEVICE id (`identity/src/sessions.ts`)
     // and names the user in the payload.
     userId: userFromPayload,
     summary: (event) => {
@@ -533,7 +533,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'security',
     type: 'security.mfa_added',
     visibility: 'user',
-    // Keyed by user_id, as the registry says and as the emit does (`identity/src/mfa.ts:566`).
+    // Keyed by user_id, as the registry says and as the emit does (`identity/src/mfa.ts`).
     // The same reader `identity.mfa.removed` uses.
     userId: userFromKey,
     summary: (event) => {
@@ -553,7 +553,7 @@ export const CLASSIFIERS = Object.freeze({
     type: 'transfer.entry_posted',
     visibility: 'user',
     userId: userFromPayload,
-    // `postings.amount` is `numeric(78,0)` (`ledger/src/migrations.ts:219`) — an integer column,
+    // `postings.amount` is `numeric(78,0)` (`ledger/src/migrations.ts`) — an integer column,
     // so ledger is in `SMALLEST_UNIT_PRODUCERS` and `money` returns null here today. The fallback
     // therefore has to carry the asset and the kind rather than shrug: "A ledger entry was posted"
     // with no other word in it is a feed row that tells its reader nothing they did not know.
@@ -574,7 +574,7 @@ export const CLASSIFIERS = Object.freeze({
    * `micro-org`'s estate-wide check is the authority (`org/tools/estate-topic-gaps.json`,
    * `unemitted:ledger.reconciliation.completed`) and this repository re-verified it rather than
    * copying it: the string appears nowhere in `ledger/src`, and ledger's only emit is
-   * `ledger.entry.posted` (`ledger/src/entries.ts:427`). A reconciliation that finishes announces
+   * `ledger.entry.posted` (`ledger/src/entries.ts`). A reconciliation that finishes announces
    * it to nobody, so the operator query "did last night's run complete" reads a topic that has
    * never carried a message. Owner: micro-ledger. The classifier stays — it is correct, and it is
    * what makes the emit land in the right place on the day it is written.
@@ -614,8 +614,8 @@ export const CLASSIFIERS = Object.freeze({
     category: 'wallet',
     type: 'wallet.created',
     visibility: 'user',
-    // Keyed by WALLET id (`wallet/src/wallets.ts:216`, registry keyedBy `wallet_id`); the payload
-    // names the user (`wallet/src/wallets.ts:219`).
+    // Keyed by WALLET id (`wallet/src/wallets.ts`, registry keyedBy `wallet_id`); the payload
+    // names the user (`wallet/src/wallets.ts`).
     userId: userFromPayload,
     summary: (event) => {
       const chain = text(event, 'chain', 24)
@@ -630,7 +630,7 @@ export const CLASSIFIERS = Object.freeze({
    * **The one money topic in the estate that can print its figure, because its producer sent one.**
    *
    * `amountFormatted` is declared and read, and `money` prefers it over the raw `amount` beside
-   * it. wallet emits the pair from one place (`wallet/src/deposits.ts:768-770`) and it is the only
+   * it. wallet emits the pair from one place (`wallet/src/deposits.ts`) and it is the only
    * party that can: the conversion needs `chainSpec(assetCode).decimals`, and a classifier may not
    * go and look that up. Where the pair exists, the user gets the sentence they want.
    *
@@ -655,7 +655,7 @@ export const CLASSIFIERS = Object.freeze({
    * **No figure, and it is wallet's payload that decides that rather than a preference here.**
    *
    * `WithdrawalRequestedPayload` sends `amount`, `fee` and `net` and nothing formatted
-   * (`wallet/src/withdrawals.ts:434-447`) — the same row that `toWithdrawal` twenty lines earlier
+   * (`wallet/src/withdrawals.ts`) — the same row that `toWithdrawal` twenty lines earlier
    * converts for its API response, so the omission is an inconsistency in wallet rather than a
    * scale that does not exist. Until `amountFormatted` is on this payload the honest sentence
    * names the asset and declines the number; the moment wallet adds it, `money` picks it up and
@@ -688,22 +688,22 @@ export const CLASSIFIERS = Object.freeze({
    * so they land somewhere a person can read rather than in the quarantine.
    *
    * **All five are `userFromPayload`, and that is the whole of the trap.** Four are keyed by a
-   * `wallet_id` or a `withdrawal_id`, both `uuid` columns (`wallet/src/migrations.ts:364-365`), so
+   * `wallet_id` or a `withdrawal_id`, both `uuid` columns (`wallet/src/migrations.ts`), so
    * `userFromKey` does not fail on them — it returns a well-formed, queryable, WRONG id, exactly as
    * it did for `identity.session.created` in production. The fifth is keyed
    * `chain:network:address_key`, which is not a uuid at all. Every one of the five names the user on
    * its payload, and none may read the ACTOR: `wallet.link.revoked`'s actor is `input.by`
-   * (`wallet/src/links.ts:534`), which is an OPERATOR when support disconnects a wallet, and
+   * (`wallet/src/links.ts`), which is an OPERATOR when support disconnects a wallet, and
    * `deposit_address.assigned` and `withdrawal.stuck` are emitted by jobs as `service:wallet`.
    *
    * **No figure reaches any of these summaries, and that is measured rather than squeamish.**
    * wallet's `amount` is SMALLEST UNITS — `toWithdrawal` formats it as
-   * `formatAmount(BigInt(row.amount), decimals)` (`wallet/src/withdrawals.ts:167-173`) and the
+   * `formatAmount(BigInt(row.amount), decimals)` (`wallet/src/withdrawals.ts`) and the
    * payload carries the raw side of that, with no `decimals` field to divide by. Same refusal as
    * `tessera.venue.booked` and `settlement.sweep.completed`, for the same measured reason — and
    * since #199 the refusal is `money`'s rather than each classifier's, so it covers the record's
    * `amount` COLUMN too. This block previously said the number was "still captured, typed, beside
-   * its `assetCode`" in that column and treated that as safe; `hub-web/src/pages/activity.tsx:202`
+   * its `assetCode`" in that column and treated that as safe; `hub-web/src/pages/activity.tsx`
    * renders it, so it was neither typed nor safe. The figure survives in the stored payload for
    * the topics that declare `amount`, which is where an unrendered field belongs.
    * ------------------------------------------------------------------------------------------ */
@@ -718,7 +718,7 @@ export const CLASSIFIERS = Object.freeze({
    *
    * `supersedesId` decides the sentence, and it is a real distinction rather than a nicety: an
    * address ASSIGNED is somewhere to send money to, an address ROTATED means the previous one
-   * should not be used again (`wallet/src/deposits.ts:345`, `supersedes_id`). A user who reads the
+   * should not be used again (`wallet/src/deposits.ts`, `supersedes_id`). A user who reads the
    * two as one event keeps depositing to a superseded address.
    *
    * `walletId`, `assignmentId`, `scheme` and `custodyKeyUrn` are not declared. `custodyKeyUrn` is
@@ -730,8 +730,8 @@ export const CLASSIFIERS = Object.freeze({
     category: 'deposit',
     type: 'deposit.address_assigned',
     visibility: 'user',
-    // Keyed `chain:network:address_key` (`wallet/src/deposits.ts:353`), which is not a user and not
-    // a uuid; the payload names the user (`:356`).
+    // Keyed `chain:network:address_key` (`wallet/src/deposits.ts`), which is not a user and not
+    // a uuid; the payload names the user.
     userId: userFromPayload,
     summary: (event) => {
       // Every declared field is read before anything branches. The allowlist test drives this
@@ -773,8 +773,8 @@ export const CLASSIFIERS = Object.freeze({
     category: 'wallet',
     type: 'wallet.link_verified',
     visibility: 'user',
-    // NOT userFromKey: keyed by WALLET id (`wallet/src/links.ts:425`), a uuid. NOT userFromActor
-    // either, though the actor happens to be `user:<userId>` here (`:434`) — see the header on
+    // NOT userFromKey: keyed by WALLET id (`wallet/src/links.ts`), a uuid. NOT userFromActor
+    // either, though the actor happens to be `user:<userId>` here — see the header on
     // `userFromActor`; the payload states the owner, so nothing has to depend on that coincidence.
     userId: userFromPayload,
     summary: (event) => {
@@ -789,7 +789,7 @@ export const CLASSIFIERS = Object.freeze({
   /**
    * The mirror of the above, and it is two facts rather than one.
    *
-   * `wallet/src/links.ts:499-527` and §3.2: `authorisation: null` is "disconnect a wallet" — every
+   * `wallet/src/links.ts` and §3.2: `authorisation: null` is "disconnect a wallet" — every
    * permission revoked AND the link itself closed, in one transaction — while a named
    * `authorisation` removes one permission and leaves the link standing. "This wallet is no longer
    * yours to withdraw to" and "this wallet may no longer do one particular thing" are not one entry
@@ -797,7 +797,7 @@ export const CLASSIFIERS = Object.freeze({
    * `identity.session.revoked`'s is: the frontend switches on it to choose the emphasis.
    *
    * **Not `userFromActor`, and this is the topic that proves why the rule exists.** The actor is
-   * `input.by` (`:534`), which is whoever pressed the button — an operator revoking a compromised
+   * `input.by`, which is whoever pressed the button — an operator revoking a compromised
    * link, or another service. The record belongs to the account holder either way, and reading the
    * actor here would file a support action in the support agent's feed and nowhere else.
    */
@@ -806,7 +806,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'wallet',
     type: (event) => (revokedWholeLink(event) ? 'wallet.link_revoked' : 'wallet.authorisation_revoked'),
     visibility: 'user',
-    // Keyed by WALLET id (`wallet/src/links.ts:530`), a uuid; the payload names the user (`:532`).
+    // Keyed by WALLET id (`wallet/src/links.ts`), a uuid; the payload names the user.
     userId: userFromPayload,
     summary: (event) => {
       const authorisation = text(event, 'authorisation', 32)
@@ -829,14 +829,14 @@ export const CLASSIFIERS = Object.freeze({
    *
    * `settlement.outbound.failed` above says a failed withdrawal is currently in nobody's timeline,
    * because settlement's payload carries no `userId`. This is the other half of that sentence and
-   * the half that can be delivered: `wallet/src/withdrawals.ts:637-646` emits `userId` off the row,
+   * the half that can be delivered: `wallet/src/withdrawals.ts` emits `userId` off the row,
    * on the branch where the reservation has ALREADY been released back into the spendable balance
-   * (`:630`, `deps.ledger.release`). The money is back before this event exists, so the entry is a
+   * (, `deps.ledger.release`). The money is back before this event exists, so the entry is a
    * statement of fact rather than a promise.
    *
    * **`reason` is not declared, and that is a decision rather than an oversight.** It is
    * `refunded.failureReason`, which is written as `` `${err.code}: ${err.message}` ``
-   * (`wallet/src/withdrawals.ts:403`) — an unbounded string from whatever failed, which on a chain
+   * (`wallet/src/withdrawals.ts`) — an unbounded string from whatever failed, which on a chain
    * error routinely carries a destination address. That is a third party's identifier arriving in a
    * column this service keeps for ever, and `redact.ts`'s header is explicit that an over-declared
    * key is one that party's own erasure can never reach. The user does not need it and the operator
@@ -847,7 +847,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'withdrawal',
     type: 'withdrawal.refunded',
     visibility: 'user',
-    // NOT userFromKey: keyed by WITHDRAWAL id (`wallet/src/withdrawals.ts:639`), a uuid.
+    // NOT userFromKey: keyed by WITHDRAWAL id (`wallet/src/withdrawals.ts`), a uuid.
     userId: userFromPayload,
     summary: () =>
       'Your withdrawal could not be sent, and the amount that was held for it has been returned to your balance.',
@@ -862,7 +862,7 @@ export const CLASSIFIERS = Object.freeze({
    *     and it frequently has no user on it, which is why it is demoted to internal so often.
    *   * `wallet.withdrawal.stuck` — this one, wallet's, keyed `withdrawal_id`. A withdrawal sat in
    *     `queued` or `settling` past `WALLET_WITHDRAWAL_STUCK_MINUTES` with **no word from
-   *     settlement at all** (`wallet/src/withdrawals.ts:663-690`). Nothing is known to have been
+   *     settlement at all** (`wallet/src/withdrawals.ts`). Nothing is known to have been
    *     broadcast; it may never have left. It always names the user, because `sweepStuck` selects
    *     `user_id` off the row.
    *
@@ -882,8 +882,8 @@ export const CLASSIFIERS = Object.freeze({
     category: 'withdrawal',
     type: 'withdrawal.stuck_no_settlement',
     visibility: 'user',
-    // NOT userFromKey: keyed by WITHDRAWAL id (`wallet/src/withdrawals.ts:685`), a uuid. NOT the
-    // actor either — this is emitted by a sweep job as `service:wallet` (`:692`).
+    // NOT userFromKey: keyed by WITHDRAWAL id (`wallet/src/withdrawals.ts`), a uuid. NOT the
+    // actor either — this is emitted by a sweep job as `service:wallet`.
     userId: userFromPayload,
     summary: (event) => {
       const minutes = payloadOf(event)['stuckMinutes']
@@ -896,7 +896,7 @@ export const CLASSIFIERS = Object.freeze({
   },
   /**
    * The figure is settlement's `row.amount.toString()` — smallest units, and no formatted twin on
-   * the payload (`settlement/src/withdrawals.ts:509-519`, `base(row)`). So the sentence names the
+   * the payload (`settlement/src/withdrawals.ts`, `base(row)`). So the sentence names the
    * asset and the transaction and declines the number, which is the whole of what a user needs to
    * check it against their wallet anyway: the hash is the thing they can look up.
    *
@@ -932,14 +932,14 @@ export const CLASSIFIERS = Object.freeze({
   /* ── settlement's three newly registered topics, and why only ONE of them names a user ───────
    *
    * All three are keyed by something that is not a user, and all three would have been misfiled by
-   * the obvious reader. A withdrawal id is a `uuid` (`wallet/src/migrations.ts:364-365`) and a
+   * the obvious reader. A withdrawal id is a `uuid` (`wallet/src/migrations.ts`) and a
    * sweep source id is a `uuid` too, so `userFromKey` does not return null on any of them — it
    * returns a real, well-formed, wrong id, and a wrong uuid queries exactly as cleanly as a right
    * one. That is `identity.session.created` twice over, which is the one mistake this file has
    * already made in production.
    *
    * `userFromPayload` is not automatically the repair either. `confirmedEvents`
-   * (`settlement/src/withdrawals.ts:436-448`) and `failedEvents` (`:475-486`) build DELIBERATELY
+   * (`settlement/src/withdrawals.ts`) and `failedEvents` build DELIBERATELY
    * NARROW payloads — `{ withdrawalId, txHash, confirmedAt }` and
    * `{ withdrawalId, reason, refundable }` — and neither carries `userId`. So for these two the
    * honest answer today is "no user is available", and the interesting question is what each of
@@ -949,25 +949,25 @@ export const CLASSIFIERS = Object.freeze({
    * **Nobody's feed, on purpose — because the user already has this entry.**
    *
    * This is not a case of "no user could be found and so we gave up". `confirmedEvents`
-   * (`settlement/src/withdrawals.ts:436-462`) returns BOTH `settlement.outbound.confirmed` and
+   * (`settlement/src/withdrawals.ts`) returns BOTH `settlement.outbound.confirmed` and
    * `settlement.withdrawal.completed` from a single `return [...]`, behind a single guard
    * (`row.purpose !== 'withdrawal' || !row.sourceRef`), for the same row. They are not two facts
    * that usually coincide; they are one fact emitted twice by one statement, and neither can occur
    * without the other. `settlement.withdrawal.completed` is classified sixteen lines above as
    * `withdrawal.completed`, `user`-visible, owner read off its payload's `userId` — which that
-   * payload does carry (`withdrawals.ts:456`).
+   * payload does carry (`withdrawals.ts`).
    *
    * Activity subscribes to every topic (AD-11), so it receives both. Attributing this one to a
    * user would therefore put "your withdrawal was sent" in that user's timeline TWICE for one
    * payment — which reads to the person holding the phone as two withdrawals, and is a worse feed
    * than a missing entry because it is a plausible one. wallet's subscription is the reason the
-   * narrow topic exists at all (`wallet/src/settlement.ts:167`, branched on at
-   * `wallet/src/server.ts:859` to release the reservation); the feed is not its audience.
+   * narrow topic exists at all (`wallet/src/settlement.ts`, branched on at
+   * `wallet/src/server.ts` to release the reservation); the feed is not its audience.
    *
    * `() => null` rather than `userFromPayload`, and that choice is load-bearing rather than
    * decorative. `userFromPayload` returns null today too, so both spellings behave identically —
    * but the day settlement widens this payload (an entirely reasonable thing for it to do; the row
-   * has `userId` right there at `outbound.ts:230`), `userFromPayload` would SILENTLY start
+   * has `userId` right there at `outbound.ts`), `userFromPayload` would SILENTLY start
    * double-posting every completed withdrawal into a real feed, with no diff in this repository to
    * blame. A refusal has to be spelled as a refusal or it is only a coincidence.
    */
@@ -986,7 +986,7 @@ export const CLASSIFIERS = Object.freeze({
    * The only report a failed withdrawal has, and the one that is two facts.
    *
    * **Two facts.** `refundable` decides which of two materially different things happened, and
-   * `wallet/src/withdrawals.ts:592-600` is where the difference is real rather than editorial:
+   * `wallet/src/withdrawals.ts` is where the difference is real rather than editorial:
    * `refundable === true` transitions the withdrawal to `failed` and then calls `refundWithdrawal`,
    * releasing the reservation back into the user's spendable balance; anything else transitions it
    * to **`stuck`** and returns — the funds stay held while an operator establishes whether the
@@ -996,17 +996,17 @@ export const CLASSIFIERS = Object.freeze({
    * so that `identity.session.revoked` would not have to do that.
    *
    * **The user, and the gap.** This topic carries no `userId` — `failedEvents`
-   * (`settlement/src/withdrawals.ts:475-486`) emits `{ withdrawalId, reason, refundable }` and
+   * (`settlement/src/withdrawals.ts`) emits `{ withdrawalId, reason, refundable }` and
    * nothing else — so `userFromPayload` finds nothing and `classify` files the record as internal.
    * That is stated rather than papered over, because unlike `.confirmed` above there is no second
    * topic covering this fact for the user: `failedEvents` returns a one-element array, no
    * `settlement.withdrawal.failed` exists in the registry, and the only other event in the
-   * sequence is `wallet.withdrawal.refunded` (`wallet/src/withdrawals.ts:640`), which is
+   * sequence is `wallet.withdrawal.refunded` (`wallet/src/withdrawals.ts`), which is
    * unregistered, fires only on the refundable branch, and so cannot cover the stuck one at all.
    * **A failed withdrawal is currently in nobody's timeline.** A classifier may not read a
    * database, so this repository cannot close that; the repair is one field on settlement's
    * payload — `userId: row.userId`, which `stuckEvents` already puts on the neighbouring event
-   * (`withdrawals.ts:521`) from the same row — and it is filed for micro-settlement.
+   * (`withdrawals.ts`) from the same row — and it is filed for micro-settlement.
    *
    * `userFromPayload` rather than `() => null` is the opposite call from `.confirmed`, for the
    * opposite reason: there the payload widening would introduce a duplicate, here it would deliver
@@ -1019,8 +1019,8 @@ export const CLASSIFIERS = Object.freeze({
     type: (event) =>
       isRefundable(event) ? 'withdrawal.failed_refunded' : 'withdrawal.failed_held',
     visibility: 'user',
-    // NOT userFromKey: the key is the WITHDRAWAL id (`withdrawals.ts:480`, registry keyedBy
-    // `withdrawal_id`) and it is a uuid (`wallet/src/migrations.ts:364-365`), so userFromKey would
+    // NOT userFromKey: the key is the WITHDRAWAL id (`withdrawals.ts`, registry keyedBy
+    // `withdrawal_id`) and it is a uuid (`wallet/src/migrations.ts`), so userFromKey would
     // hand back a withdrawal id as a user id — well-formed, queryable and wrong.
     userId: userFromPayload,
     summary: (event) =>
@@ -1039,10 +1039,10 @@ export const CLASSIFIERS = Object.freeze({
    *
    * It is refused on three grounds, in increasing order of how much they matter.
    *
-   * 1. There is no user on the event. The payload (`sweeps.ts:494-507`) is
+   * 1. There is no user on the event. The payload (`sweeps.ts`) is
    *    `{ outboundId, sweepSourceId, chain, network, assetCode, from, to, amount, fee, txHash,
    *    confirmedAt }`. The owner exists but only in a table: `sweep_sources.custody_user_id`,
-   *    which settlement itself has to go and read (`sweepBindingFor`, `sweeps.ts:455-468`). A
+   *    which settlement itself has to go and read (`sweepBindingFor`, `sweeps.ts`). A
    *    classifier may not read a database — see the header — so a user-visible answer here would
    *    have to be invented, and `classify` would demote it to internal regardless.
    * 2. **Nothing about the user's position changes.** The user's claim on the platform was
@@ -1061,13 +1061,13 @@ export const CLASSIFIERS = Object.freeze({
    *    that put sign-IN and sign-OUT both under `security`, applied to treasury accounting.
    *
    * The summary deliberately carries no amount. `row.amount` is smallest units
-   * (`settlement/src/withdrawals.ts:123`, `chains.ts:432`), the payload does not say how many
+   * (`settlement/src/withdrawals.ts`, `chains.ts`), the payload does not say how many
    * decimals the asset has, and a rendered figure that is off by eighteen orders of magnitude is
    * worse for the operator reading it than no figure at all.
    *
    * **This block used to end "`assetCode` and `amount` still reach the record's own columns
    * through `classify`, where they are typed and not prose", and that second half was wrong.**
-   * `hub-web/src/pages/activity.tsx:202` prints `formatAmount(record.amount)` next to
+   * `hub-web/src/pages/activity.tsx` prints `formatAmount(record.amount)` next to
    * `record.assetCode`, so the column is rendered as money one hop later — the argument written
    * here to keep the figure out of the prose applies to it unchanged. `assetCode` still reaches
    * its column; the figure is kept in the stored payload, in its own units. `money` has the full
@@ -1105,7 +1105,7 @@ export const CLASSIFIERS = Object.freeze({
     payloadKeys: ['name'],
     category: 'community',
     type: 'worlds.title_registered',
-    // An operator act on the platform, no player subject (`worlds/src/titles.ts:169-176`).
+    // An operator act on the platform, no player subject (`worlds/src/titles.ts`).
     visibility: 'internal',
     userId: () => null,
     summary: (event) => {
@@ -1118,7 +1118,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'reward',
     type: 'worlds.reward_granted',
     visibility: 'user',
-    // Keyed by REWARD id; the user is in the payload (`worlds/src/rewards.ts:470`).
+    // Keyed by REWARD id; the user is in the payload (`worlds/src/rewards.ts`).
     userId: userFromPayload,
     summary: (event) => {
       const amount = text(event, 'amountShards', 24)
@@ -1131,7 +1131,7 @@ export const CLASSIFIERS = Object.freeze({
     type: 'worlds.provision_completed',
     visibility: 'user',
     // Keyed by ENTITLEMENT id; the user is the provision `subject`
-    // (`worlds/src/provisioning.ts:566-571`), and the actor is the service — the actor fallback
+    // (`worlds/src/provisioning.ts`), and the actor is the service — the actor fallback
     // would attribute this to nobody.
     userId: (event) => {
       const value = payloadOf(event)['subject']
@@ -1144,7 +1144,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'billing',
     type: 'worlds.provision_failed',
     visibility: 'user',
-    // Same subject reader (`worlds/src/provisioning.ts:602-613`): the person who paid must see
+    // Same subject reader (`worlds/src/provisioning.ts`): the person who paid must see
     // the failure in their own feed, since the refund names the entitlement this row carries.
     userId: (event) => {
       const value = payloadOf(event)['subject']
@@ -1157,7 +1157,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'reward',
     type: 'emberkin.achievement_unlocked',
     visibility: 'user',
-    // Keyed `user:code`, NOT a bare uuid (`emberkin/src/battles.ts:204-205`) — userFromKey would
+    // Keyed `user:code`, NOT a bare uuid (`emberkin/src/battles.ts`) — userFromKey would
     // return null; the payload names the user.
     userId: userFromPayload,
     summary: (event) => {
@@ -1170,7 +1170,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'reward',
     type: 'emberkin.battle_resolved',
     visibility: 'user',
-    // Keyed by BATTLE id; user in the payload (`emberkin/src/battles.ts:215`).
+    // Keyed by BATTLE id; user in the payload (`emberkin/src/battles.ts`).
     userId: userFromPayload,
     summary: (event) => {
       const outcome = text(event, 'outcome', 16)
@@ -1206,7 +1206,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'reward',
     type: 'emberkin.reward_granted',
     visibility: 'user',
-    // Keyed by idempotency key; user in the payload (`emberkin/src/seasons.ts:139`).
+    // Keyed by idempotency key; user in the payload (`emberkin/src/seasons.ts`).
     userId: userFromPayload,
     summary: (event) => {
       const amount = text(event, 'amount', 24)
@@ -1230,7 +1230,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'ownership',
     type: 'aetherholm.city_founded',
     visibility: 'user',
-    // Keyed by CITY id; the user is in the payload (aetherholm/src/cities.ts:183). The session
+    // Keyed by CITY id; the user is in the payload (aetherholm/src/cities.ts). The session
     // misattribution above is why this is spelled out rather than left to userFromKey.
     userId: userFromPayload,
     summary: (event) => {
@@ -1263,7 +1263,7 @@ export const CLASSIFIERS = Object.freeze({
     type: 'aetherholm.skerry_provisioned',
     visibility: 'user',
     // Keyed by ENTITLEMENT id; the user is the provision subject
-    // (aetherholm/src/provisioning.ts:109).
+    // (aetherholm/src/provisioning.ts).
     userId: (event) => {
       const value = payloadOf(event)['subject']
       return typeof value === 'string' && UUID_PATTERN.test(value) ? value : null
@@ -1278,7 +1278,7 @@ export const CLASSIFIERS = Object.freeze({
     type: 'aetherholm.battle_resolved',
     visibility: 'user',
     // Keyed by BATTLE id, actor is the ATTACKER (`user:` prefix on the emit,
-    // aetherholm/src/fleets.ts:497), and the payload carries attackerUserId AND defenderUserId.
+    // aetherholm/src/fleets.ts), and the payload carries attackerUserId AND defenderUserId.
     // The feed record belongs to the DEFENDER — "your city was raided" is their news; the
     // attacker is watching the fleet screen. Reading `userId`/key/actor here would file the raid
     // in the raider's feed, which is the session.created misattribution with a cannon.
@@ -1301,7 +1301,7 @@ export const CLASSIFIERS = Object.freeze({
     type: 'aetherholm.spire_captured',
     visibility: 'user',
     // Keyed by ISLAND id. A lone holder is named as holderUserId
-    // (aetherholm/src/sealing.ts:243); an alliance holds as a group, in which case there is no
+    // (aetherholm/src/sealing.ts); an alliance holds as a group, in which case there is no
     // single owner and the record stays internal rather than landing in one member's feed —
     // the same refusal as billing's organisation-subject entitlements above.
     userId: (event) => {
@@ -1368,7 +1368,7 @@ export const CLASSIFIERS = Object.freeze({
   },
   /**
    * **DEAD CODE TODAY: nobody emits this either**, and here the producer is not silent — it is
-   * using five other names. `mint/src/tokens.ts:254-258` declares `mint.token.created`, `.paid`,
+   * using five other names. `mint/src/tokens.ts` declares `mint.token.created`, `.paid`,
    * `.broadcast`, `.deployed` and `.failed`; `mint.deploy.confirmed` is not among them, and none
    * of the five is registered. So the one fact the estate agreed to send is the one name mint does
    * not use, while five real events arrive here as `unclassified`. Owner: micro-mint
@@ -1377,7 +1377,7 @@ export const CLASSIFIERS = Object.freeze({
    *
    * The other two entries that check named — `custody.key.exported` and
    * `settlement.withdrawal.stuck` — have since been repaired by their own repositories
-   * (`custody/src/exports.ts:459`, `settlement/src/withdrawals.ts:517-547`), so those two
+   * (`custody/src/exports.ts`, `settlement/src/withdrawals.ts`), so those two
    * classifiers are live. These are the two that are not.
    */
   'mint.deploy.confirmed': {
@@ -1398,10 +1398,10 @@ export const CLASSIFIERS = Object.freeze({
     type: 'market.listing_sold',
     visibility: 'user',
     userId: userFromPayload,
-    // `orders.amount` is `numeric(78,0)` (`market/src/migrations.ts:344`), so market is a
+    // `orders.amount` is `numeric(78,0)` (`market/src/migrations.ts`), so market is a
     // smallest-units producer and `money` declines the figure. It declined it before this change
     // too, for a different reason worth keeping written down: `orderEventPayload` emits `amount`
-    // and not `price` (`market/src/orders.ts:508-519`), so this reader has never matched a field
+    // and not `price` (`market/src/orders.ts`), so this reader has never matched a field
     // market sends. That is micro-market's or this table's to reconcile, and it is not a scale bug.
     summary: (event) => {
       const value = money(event, 'price')
@@ -1415,18 +1415,18 @@ export const CLASSIFIERS = Object.freeze({
    * The actor is the offerer, `offererSubject` is the offerer, and the key is the listing — so the
    * only subject a reader could resolve without thinking is the one person for whom this is not
    * news. `micro-market` put `sellerSubject` on the payload for exactly this reason and wrote the
-   * argument beside it (`market/src/bids.ts:453-479`): "a notification sent to the wrong person
+   * argument beside it (`market/src/bids.ts`): "a notification sent to the wrong person
    * about someone else's money is worse than no notification". `notify` had declined to write a
    * rule at all while the field was missing. This classifier reads that field and no other.
    *
    * A SUBJECT, not a bare uuid — a listing may be owned by a service principal
-   * (`market/src/server.ts:713` takes the seller from `subjectOf(principal)`), and
+   * (`market/src/server.ts` takes the seller from `subjectOf(principal)`), and
    * `userFromSubjectField` returns null for `service:<name>` rather than filing a machine's sale
    * in a person's feed. A null owner is made `internal` by `classify` below.
    *
    * `amount` and `assetCode` are declared because the payload spells them with those exact names.
    * `assetCode` reaches the record's column; `amount` does not, and `money` says why — `bids.amount`
-   * is `numeric(78,0)` (`market/src/migrations.ts:402`), so the figure on this payload is a count
+   * is `numeric(78,0)` (`market/src/migrations.ts`), so the figure on this payload is a count
    * of indivisible units and there is no `decimals` here to divide it by. It is kept in the stored
    * payload, in its own units, rather than rendered beside a code as though it were a price.
    */
@@ -1469,7 +1469,7 @@ export const CLASSIFIERS = Object.freeze({
     type: 'governance.proposal_opened',
     // NOBODY'S FEED, and this is the one classification here that refuses to name an owner.
     //
-    // The emit (`community/src/jobs.ts:220-227`) is a scheduled transition run by
+    // The emit (`community/src/jobs.ts`) is a scheduled transition run by
     // `actor: 'service:community'`, and its payload is `{ proposalId, communityId }` — there is no
     // user on it at all, not even the author, because nobody performed the act. Fanning it out to
     // every member is `notify`'s job and notify does it (`membersOf(event, 'open')`); notify has a
@@ -1528,10 +1528,10 @@ export const CLASSIFIERS = Object.freeze({
    * **And all three carry no user in the payload either**, so `userFromPayload` — the repair that
    * worked for settlement's, wallet's and identity's — finds nothing here:
    *
-   *   - `trade/src/bots.ts:614`, the sole `trade.bot.paused` emit, sends `{ botId }`.
-   *   - `devplatform/src/apikeys.ts:283-296`, `emitKeyIssued`, sends
+   *   - `trade/src/bots.ts`, the sole `trade.bot.paused` emit, sends `{ botId }`.
+   *   - `devplatform/src/apikeys.ts`, `emitKeyIssued`, sends
    *     `{ keyId, projectId, environment, display, scopes }`.
-   *   - `devplatform/src/apikeys.ts:368-382`, `emitKeyRevoked`, sends
+   *   - `devplatform/src/apikeys.ts`, `emitKeyRevoked`, sends
    *     `{ keyId, projectId, environment, display, lookupId, reason }`.
    *
    * The owner is on the ENVELOPE, in `actor`, and only reading it there gets these three into the
@@ -1542,8 +1542,8 @@ export const CLASSIFIERS = Object.freeze({
   /**
    * The first record in the `trading` category — a filter that has existed with nothing behind it.
    *
-   * **One fact, not two.** A pause is a pause: `pauseBot` (`trade/src/bots.ts:610-616`) has one
-   * caller (`trade/src/server.ts:672`), one guard (`bot.status !== 'running'`) and one payload, and
+   * **One fact, not two.** A pause is a pause: `pauseBot` (`trade/src/bots.ts`) has one
+   * caller (`trade/src/server.ts`), one guard (`bot.status !== 'running'`) and one payload, and
    * there is no field on the event that separates two different pieces of news. The variation that
    * WOULD matter — an owner pausing versus trade halting a bot that breached a limit — does not
    * exist yet, because nothing but the owner's route calls it.
@@ -1565,7 +1565,7 @@ export const CLASSIFIERS = Object.freeze({
     category: 'trading',
     type: 'trading.bot_paused',
     visibility: 'user',
-    // The actor is the bot's OWNER and not the caller: `bots.ts:614` writes
+    // The actor is the bot's OWNER and not the caller: `bots.ts` writes
     // `actor: \`user:${bot.userId}\`` off the row, so it names the owner whoever pressed the
     // button. NOT userFromKey — the key is `bot.id` (registry `keyedBy: 'bot_id'`), a uuid, so a
     // key reader would file every pause against a bot id dressed as a person.
@@ -1597,8 +1597,8 @@ export const CLASSIFIERS = Object.freeze({
     category: 'api',
     type: 'api.key_issued',
     visibility: 'user',
-    // `devplatform/src/server.ts:945`, in the key-issuing route, passes `actorOf(caller)` — which
-    // is `user:<id>` for a session-holding caller (`actorOf`, `server.ts:701`).
+    // `devplatform/src/server.ts`, in the key-issuing route, passes `actorOf(caller)` — which
+    // is `user:<id>` for a session-holding caller (`actorOf`, `server.ts`).
     // In the case this record exists for — a stolen session — that id IS the victim's, because the
     // attacker is acting as them, so the entry lands where it can be recognised as wrong. NOT
     // userFromKey: the key is `key.id` (registry `keyedBy: 'key_id'`), a uuid that is a credential
@@ -1620,10 +1620,10 @@ export const CLASSIFIERS = Object.freeze({
    * softer adjective, and the difference is real in the producer rather than editorial. There are
    * two emit paths and they are reached by different events:
    *
-   *   - `devplatform/src/server.ts:999`, the key-revocation route — the owner's own `DELETE`,
+   *   - `devplatform/src/server.ts`, the key-revocation route — the owner's own `DELETE`,
    *     actor `actorOf(caller)`. The news is a receipt: an integration the reader deliberately
    *     broke.
-   *   - `devplatform/src/server.ts:1575`, in the `identity.organisation.deleted` handler, which
+   *   - `devplatform/src/server.ts`, in the `identity.organisation.deleted` handler, which
    *     suspends the organisation and revokes EVERY live key it holds in one transaction, actor
    *     `service:identity`. The news is that a company's entire production integration stopped, at
    *     whatever hour identity processed the erasure, without anybody there touching anything.
@@ -1650,7 +1650,7 @@ export const CLASSIFIERS = Object.freeze({
     type: (event) =>
       userFromActor(event) === null ? 'api.key_revoked_by_platform' : 'api.key_revoked',
     visibility: 'user',
-    // NOT userFromKey: `apikeys.ts:371` passes `key.id` (registry `keyedBy: 'key_id'`), a uuid.
+    // NOT userFromKey: `apikeys.ts` passes `key.id` (registry `keyedBy: 'key_id'`), a uuid.
     userId: userFromActor,
     summary: (event) => {
       const display = text(event, 'display', 48)
@@ -1698,7 +1698,7 @@ export const CLASSIFIERS = Object.freeze({
   /**
    * The owner's warning, and the ONLY warning they get.
    *
-   * `notify` says it plainly (`catalogue.ts:1230`): a contest is only insertable after 90 days
+   * `notify` says it plainly (`catalogue.ts`): a contest is only insertable after 90 days
    * with no visitor or edit plus 30 more, so the owner is by construction not there, and
    * `tessera.parcel.transferred` is "the same news arriving after it is too late to matter". The
    * payload puts `ownerSubject` before `challengerSubject` deliberately — tessera's own comment
@@ -1717,7 +1717,7 @@ export const CLASSIFIERS = Object.freeze({
    * **THE DISPOSSESSED OWNER'S RECORD, not the new owner's**, and one record is all there is.
    *
    * Two subjects on the payload, and `notify` chose `fromSubject` with a reason this file has no
-   * grounds to overrule (`catalogue.ts:1188-1200`): a contest "takes ground off its owner while
+   * grounds to overrule (`catalogue.ts`): a contest "takes ground off its owner while
    * they are not there — the loser did nothing, is told by nothing else, and finds out by opening
    * Tessera and looking for land that is gone". The winner opened the contest and was waiting for
    * it.
@@ -1851,7 +1851,7 @@ export function subjectUrnFor(producer: ProducerService, aggregate: string, key:
  * > `TypeError: Cannot read properties of undefined (reading 'payloadKeys')`
  *
  * `micro-contracts` registered five wallet topics this build had no classifier for. `known` is
- * computed from the REGISTRY (`ingest.ts:153`), so those five took the classified branch,
+ * computed from the REGISTRY (`ingest.ts`), so those five took the classified branch,
  * `CLASSIFIERS[topic]` was `undefined`, and the next line threw — `POST /ingest` 500s, the relay
  * retries for ever, and the feed stops. The old line read
  * `const classifier: TopicClassifier = CLASSIFIERS[envelope.topic]`, and the annotation was a bare
@@ -1924,7 +1924,7 @@ export function classify(envelope: EventEnvelope, known: boolean): Classified {
     subjectUrn,
     summary: classifier.summary(envelope),
     // `money`, not `amount`. This column is rendered by a frontend as a decimal figure beside
-    // `assetCode` (`hub-web/src/pages/activity.tsx:186,202`), so a number of unknown scale here is
+    // `assetCode` (`hub-web/src/pages/activity.tsx,202`), so a number of unknown scale here is
     // the same defect as one in the prose and not a safer place to put it. See `money`'s header.
     amount: money(envelope) ?? money(envelope, 'price'),
     assetCode: asset(envelope),

@@ -71,7 +71,7 @@ test('a known event is classified, attributed and summarised', () => {
   const { envelope } = delivery({
     topic: 'wallet.deposit.confirmed',
     key: 'wallet-1',
-    // The pair as wallet actually emits it (`wallet/src/deposits.ts:768-770`): the raw smallest
+    // The pair as wallet actually emits it (`wallet/src/deposits.ts`): the raw smallest
     // units AND the decimal figure wallet converted with the asset's `decimals`. The fixture used
     // to carry `amount: '25.5'` alone, which is a payload wallet has never sent — 25.5 of a
     // SHARD's indivisible units is 2.55e-17 SHARD, and asserting on it proved nothing.
@@ -107,7 +107,7 @@ test('THE RULE: a topic the REGISTRY knows and this build cannot classify is qua
   // wallet topics — those are classified now, and a test naming them would go green for ever the
   // moment they were added while leaving the mechanism exactly as broken for the next five.
   //
-  // What crashed: `known` is computed from the REGISTRY (`ingest.ts:153`), not from this build's
+  // What crashed: `known` is computed from the REGISTRY (`ingest.ts`), not from this build's
   // table, so a topic `@cloudsforge/contracts-events` had registered and `classify.ts` had no
   // entry for arrived with `known === true`, took the classified branch, and dereferenced
   // `undefined` —
@@ -234,7 +234,7 @@ test('an alliance-held spire has no single owner and stays internal; a lone hold
 
 test('a plain sign-out and a security revocation are not the same entry', () => {
   // The whole reason `identity.session.revoked` carries a `reason`. notify fires a CRITICAL
-  // notification for every reason except `signed_out` (notify/src/catalogue.ts:258); a timeline
+  // notification for every reason except `signed_out` (notify/src/catalogue.ts); a timeline
   // that read both the same way would contradict the alert the user just received.
   const session = '33333333-3333-4333-8333-333333333333'
   const revoked = (reason: string) =>
@@ -249,7 +249,7 @@ test('a plain sign-out and a security revocation are not the same entry', () => 
   assert.match(burned.summary, /password was reset/)
   assert.notEqual(burned.type, plain.type)
 
-  // A reason this build has never seen — the refresh-family burn at identity/src/server.ts:892 has
+  // A reason this build has never seen — the refresh-family burn at identity/src/server.ts has
   // no constant — must fall through to the ALARMING sentence, never the reassuring one.
   const unknown = revoked('refresh_token_reuse')
   assert.equal(unknown.type, 'security.session_revoked')
@@ -281,7 +281,7 @@ test('a wallet created reads as a link when the user brought their own', () => {
 
   const custodial = created({ walletId: 'w-1', userId: ALICE, origin: 'custodial', chain: 'ethereum', network: 'mainnet' })
   assert.equal(custodial.category, 'wallet')
-  // Keyed by WALLET id, so the user comes off the payload — wallet/src/wallets.ts:219.
+  // Keyed by WALLET id, so the user comes off the payload — wallet/src/wallets.ts.
   assert.equal(custodial.userId, ALICE)
   assert.match(custodial.summary, /created for you/)
   assert.match(custodial.summary, /ethereum mainnet/)
@@ -294,7 +294,7 @@ test('a wallet created reads as a link when the user brought their own', () => {
 test('a proposal opening belongs to no one, and a vote belongs to its voter', () => {
   const proposal = '55555555-5555-4555-8555-555555555555'
 
-  // No user anywhere on the emit (community/src/jobs.ts:220-227 — actor `service:community`,
+  // No user anywhere on the emit (community/src/jobs.ts — actor `service:community`,
   // payload `{ proposalId, communityId }`). Guessing an owner would file a community-wide fact in
   // one member's feed; notify is what fans it out to the membership.
   const opened = classify(
@@ -425,7 +425,7 @@ test('a paused bot reaches its owner — not the bot, and not whoever pressed th
   const paused = (payload: Record<string, unknown>, actor: Actor) =>
     classify(delivery({ topic: 'trade.bot.paused', key: BOT, payload, actor }).envelope, true)
 
-  // The payload trade really sends: `{ botId }` and nothing else (trade/src/bots.ts:614).
+  // The payload trade really sends: `{ botId }` and nothing else (trade/src/bots.ts).
   const owned = paused({ botId: BOT }, `user:${ALICE}`)
   assert.equal(owned.category, 'trading')
   assert.equal(owned.type, 'trading.bot_paused')
@@ -450,7 +450,7 @@ test('a paused bot reaches its owner — not the bot, and not whoever pressed th
   assert.equal(contested.userId, ALICE, 'the actor is the owner; a payload field must not override it')
   assert.notEqual(contested.userId, BOB)
 
-  // 2. An actor that is not a person. `bots.ts:614` writes the OWNER's id off the row rather than
+  // 2. An actor that is not a person. `bots.ts` writes the OWNER's id off the row rather than
   //    the caller's, so this cannot happen today — but the day trade halts a bot itself, the entry
   //    must land in nobody's feed rather than in a guess. Internal, never a wrong feed.
   const halted = paused({ botId: BOT }, 'service:trade')
@@ -464,7 +464,7 @@ test('an API key issued lands in the feed of the person it can act as', () => {
       delivery({
         topic: 'devplatform.key.issued',
         key: API_KEY,
-        // devplatform/src/apikeys.ts:283-296 — the display and the scopes, never the secret.
+        // devplatform/src/apikeys.ts — the display and the scopes, never the secret.
         payload: {
           keyId: API_KEY,
           projectId: '018f0000-0000-7000-8000-0000000000a1',
@@ -489,7 +489,7 @@ test('an API key issued lands in the feed of the person it can act as', () => {
   assert.match(byOwner.summary, /cfk_live_abcd1234/)
   assert.match(byOwner.summary, /without a password/)
 
-  // A key minting a key authenticates as `service:<display>` (devplatform/src/server.ts:701). No
+  // A key minting a key authenticates as `service:<display>` (devplatform/src/server.ts). No
   // person acted, so no person is named — and the record is internal rather than a guess.
   const byMachine = issued('service:cfk_live_abcd1234')
   assert.equal(byMachine.userId, null)
@@ -506,7 +506,7 @@ test('a key revoked by its owner and a key revoked by the platform are two diffe
       delivery({
         topic: 'devplatform.key.revoked',
         key: API_KEY,
-        // devplatform/src/apikeys.ts:368-382.
+        // devplatform/src/apikeys.ts.
         payload: {
           keyId: API_KEY,
           projectId: 'a1',
@@ -520,7 +520,7 @@ test('a key revoked by its owner and a key revoked by the platform are two diffe
       true,
     )
 
-  // devplatform/src/server.ts:999 — the owner's own DELETE. A receipt.
+  // devplatform/src/server.ts — the owner's own DELETE. A receipt.
   const mine = revoked(`user:${ALICE}`, 'rotating')
   assert.equal(mine.category, 'api')
   assert.equal(mine.type, 'api.key_revoked')
@@ -529,7 +529,7 @@ test('a key revoked by its owner and a key revoked by the platform are two diffe
   assert.match(mine.summary, /Reason given: rotating/)
   assert.doesNotMatch(mine.summary, /by CloudsForge/)
 
-  // devplatform/src/server.ts:1575 — the identity.organisation.deleted handler revokes EVERY live
+  // devplatform/src/server.ts — the identity.organisation.deleted handler revokes EVERY live
   // key the organisation holds, as `service:identity`. A company's whole production integration
   // stopping is not the same news as an engineer rotating one key, and a single static `type`
   // would hand a frontend one icon for both.
@@ -573,7 +573,7 @@ test('an actor spelling the contract refuses is not a user, and never throws', (
 })
 
 test('one payment does not become two feed entries: outbound.confirmed is internal, withdrawal.completed is the user\'s', () => {
-  // `confirmedEvents` (settlement/src/withdrawals.ts:436-462) returns BOTH topics from one
+  // `confirmedEvents` (settlement/src/withdrawals.ts) returns BOTH topics from one
   // `return [...]` behind one guard, for one row. Activity subscribes to every topic, so it gets
   // both. If the narrow one were attributed, a user would see "your withdrawal was sent" twice for
   // one payment — which reads as two withdrawals, and is worse than a missing entry because it is
@@ -622,13 +622,13 @@ test('a failed withdrawal reads as two different facts, and the reassuring one i
     classify(delivery({ topic: 'settlement.outbound.failed', key: WITHDRAWAL, payload }).envelope, true)
   const base = { withdrawalId: WITHDRAWAL, userId: ALICE, reason: 'insufficient gas' }
 
-  // `refundable: true` — wallet/src/withdrawals.ts:596-600 transitions to `failed` and refunds.
+  // `refundable: true` — wallet/src/withdrawals.ts transitions to `failed` and refunds.
   const refunded = failed({ ...base, refundable: true })
   assert.equal(refunded.category, 'withdrawal')
   assert.equal(refunded.type, 'withdrawal.failed_refunded')
   assert.match(refunded.summary, /returned to your balance/)
 
-  // `refundable: false` — wallet/src/withdrawals.ts:592-594 transitions to **stuck** and holds the
+  // `refundable: false` — wallet/src/withdrawals.ts transitions to **stuck** and holds the
   // funds while an operator establishes whether the payment left. A different fact, not a softer
   // adjective, so it must not share a `type` with the line above.
   const held = failed({ ...base, refundable: false })
@@ -638,7 +638,7 @@ test('a failed withdrawal reads as two different facts, and the reassuring one i
   assert.notEqual(held.summary, refunded.summary)
 
   // The field ABSENT must read as held, never as refunded. wallet defaults the same way
-  // (`payload['refundable'] === true`, wallet/src/server.ts:873) because refunding a payment that
+  // (`payload['refundable'] === true`, wallet/src/server.ts) because refunding a payment that
   // really landed pays the user twice; a timeline promising a refund wallet did not make would
   // contradict the balance on the same screen.
   const silent = failed(base)
@@ -649,7 +649,7 @@ test('a failed withdrawal reads as two different facts, and the reassuring one i
 })
 
 test('a failed withdrawal reaches its owner when settlement names one, and nobody when it does not', () => {
-  // settlement/src/withdrawals.ts:475-486 emits `{ withdrawalId, reason, refundable }` — no user.
+  // settlement/src/withdrawals.ts emits `{ withdrawalId, reason, refundable }` — no user.
   // So today this record has no owner and `classify` makes it internal. Pinned as a FACT rather
   // than left implicit: it is the live gap this classifier reports to micro-settlement, and if
   // settlement adds `userId: row.userId` this assertion is what tells us the gap closed.
@@ -711,13 +711,13 @@ test('a sweep is an internal treasury movement and lands in no user\'s feed', ()
   assert.notEqual(swept.userId, SWEEP_SOURCE)
   assert.match(swept.summary, /ethereum mainnet/)
 
-  // The amount is a smallest-units integer (settlement/src/withdrawals.ts:123) and the payload
+  // The amount is a smallest-units integer (settlement/src/withdrawals.ts) and the payload
   // carries no decimals, so it reaches neither the prose NOR the column. A figure eighteen orders
   // of magnitude wrong is worse than no figure.
   //
   // The column half of that reversed with #199: this assertion used to read
   // `assert.equal(swept.amount, '1000000000000000000')`, on the theory that the column was typed
-  // storage rather than presentation. `hub-web/src/pages/activity.tsx:202` renders it through a
+  // storage rather than presentation. `hub-web/src/pages/activity.tsx` renders it through a
   // decimal formatter beside `record.assetCode`, so it was presentation all along.
   assert.equal(swept.amount, null)
   assert.doesNotMatch(swept.summary, /1000000000000000000/)
@@ -744,7 +744,7 @@ test('a sweep is an internal treasury movement and lands in no user\'s feed', ()
 const WALLET = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab'
 
 test("a deposit address assigned reaches its owner, and a ROTATION does not read as a first assignment", () => {
-  // The payload wallet really sends (`wallet/src/deposits.ts:352-364`).
+  // The payload wallet really sends (`wallet/src/deposits.ts`).
   const assigned = classify(
     delivery({
       topic: 'wallet.deposit_address.assigned',
@@ -811,7 +811,7 @@ test('an external wallet link verified and revoked are the same wallet\'s story,
     delivery({
       topic: 'wallet.link.verified',
       key: WALLET,
-      // The actor really is the user here (`wallet/src/links.ts:434`) — and the owner is still
+      // The actor really is the user here (`wallet/src/links.ts`) — and the owner is still
       // read off the payload, so nothing depends on that staying true.
       actor: `user:${ALICE}`,
       payload: {
@@ -889,7 +889,7 @@ test("a refunded withdrawal and a stuck one say opposite things about where the 
   assert.equal(refunded.visibility, 'user')
   assert.match(refunded.summary, /returned to your balance/)
 
-  // wallet's `amount` is smallest units (`wallet/src/withdrawals.ts:167-173`) with no decimals on
+  // wallet's `amount` is smallest units (`wallet/src/withdrawals.ts`) with no decimals on
   // the payload, so neither the prose nor the column prints it. The column assertion was
   // `'2500000000000000000'` until #199; it is null now, because a frontend renders that column as
   // a decimal figure and the record is `user`-visible — this was the raw integer reaching a real
@@ -941,7 +941,7 @@ test("a refunded withdrawal and a stuck one say opposite things about where the 
  *
  * Three summaries printed `payload.amount` as though it were a decimal figure, and the `amount`
  * COLUMN took the same value for every money topic in the estate — where
- * `hub-web/src/pages/activity.tsx:186,202` renders it through a decimal formatter beside
+ * `hub-web/src/pages/activity.tsx,202` renders it through a decimal formatter beside
  * `record.assetCode`. Both routes are covered here, because fixing only the prose would have
  * moved the wrong number one column to the right and called it typed.
  * ═════════════════════════════════════════════════════════════════════════════════════════════ */
@@ -1004,7 +1004,7 @@ test('THE RULE: a smallest-units figure reaches neither a summary nor the amount
 })
 
 test('a deposit prints the figure wallet converted, and never the one it did not', () => {
-  // The pair as `wallet/src/deposits.ts:768-770` emits it. wallet is the only party that can do
+  // The pair as `wallet/src/deposits.ts` emits it. wallet is the only party that can do
   // this conversion — it needs `chainSpec(assetCode).decimals`, and a classifier may not read a
   // database to find one — so where the pair is on the payload it is authoritative.
   const credited = classify(
@@ -1042,7 +1042,7 @@ test('a deposit prints the figure wallet converted, and never the one it did not
 })
 
 test('a withdrawal requested and one completed name the asset and decline the figure', () => {
-  // `WithdrawalRequestedPayload` (`wallet/src/withdrawals.ts:434-447`) sends `amount`, `fee` and
+  // `WithdrawalRequestedPayload` (`wallet/src/withdrawals.ts`) sends `amount`, `fee` and
   // `net` raw and nothing formatted — twenty lines below `toWithdrawal`, which converts the same
   // row for wallet's own API response. So this is an omission in micro-wallet, and the day it is
   // repaired `money` picks the formatted field up and this summary starts printing the figure with
@@ -1060,8 +1060,8 @@ test('a withdrawal requested and one completed name the asset and decline the fi
   assert.notEqual(requested.summary, `Withdrawal of ${SMALLEST_UNITS} SHARD requested.`)
 
   // Settlement's side of the same money. `base(row)` puts `row.amount.toString()` on the payload
-  // (`settlement/src/withdrawals.ts:509-519`) and settlement's own parser calls that field "a
-  // decimal string of smallest units" (`withdrawals.ts:120-126`), so it is the same scale again.
+  // (`settlement/src/withdrawals.ts`) and settlement's own parser calls that field "a
+  // decimal string of smallest units" (`withdrawals.ts`), so it is the same scale again.
   // The hash stays: it is the fact a user can check against a block explorer, and it is not money.
   const completed = classify(
     delivery({
@@ -1126,7 +1126,7 @@ test('THE RULE: quarantine forgives an unregistered TOPIC and nothing else about
   // a commit that touched no producer. Each case below is an envelope that used to be stored.
   // ══════════════════════════════════════════════════════════════════════════════════════════
   const illegal: readonly (readonly [string, Record<string, unknown>, RegExp])[] = [
-    // devplatform/src/server.ts:701 spelled this `key:${display}` until it was fixed. `key` is not
+    // devplatform/src/server.ts spelled this `key:${display}` until it was fixed. `key` is not
     // an ActorKind — the four are user, service, operator, system.
     ['an API-key caller spelled `key:`', { actor: 'key:cfk_live_abcd1234' }, /actor/],
     // The erasure path passed `system:identity`. `system` is the one kind that takes NO subject,
@@ -1223,7 +1223,7 @@ test('a cursor round-trips, and a forged one is refused rather than misread', ()
  * `amountFormatted` and `priceFormatted` joined them with `money` (`classify.ts`): the `amount`
  * column is filled from the producer's own decimal figure where there is one, so both spellings
  * are probed on every topic. `wallet.deposit.confirmed` declares `amountFormatted` because wallet
- * genuinely sends it (`wallet/src/deposits.ts:770`), which is exactly what a declaration means.
+ * genuinely sends it (`wallet/src/deposits.ts`), which is exactly what a declaration means.
  */
 const GENERIC_KEYS = new Set(['amount', 'amountFormatted', 'price', 'priceFormatted', 'assetCode'])
 
@@ -1279,7 +1279,7 @@ test('THE RULE: a classifier may not read a payload key it has not declared', ()
 
 test('THE RULE: an undeclared payload key is dropped at ingest, not stored and cleaned up later', () => {
   // `identity.email.verification_requested` is the live case and the reason this exists: its real
-  // payload (`identity/src/emailVerification.ts:172-185`) carries a direct identifier and a
+  // payload (`identity/src/emailVerification.ts`) carries a direct identifier and a
   // single-use credential, and this service needs neither. Under the old code both were written
   // verbatim into a column nothing ever deleted.
   const { envelope } = delivery({

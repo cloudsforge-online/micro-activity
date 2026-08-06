@@ -10,31 +10,31 @@ Design authority: [`ecosystem/03-repository-responsibilities.md`](https://github
 
 **It owns no facts of its own.** Every row here is the shadow of something another service already
 committed. That is why there is no route that creates a record from a product's request — AD-11, and
-`src/server.ts:8-14` states it at the top of the file that would have carried one. A direct write is
+`src/server.ts` states it at the top of the file that would have carried one. A direct write is
 a write that can happen without the domain change having committed, which is a feed entry describing
 a transaction that rolled back. If it is not worth an outbox row, it is not worth a feed entry.
 
 Two further refusals, both structural:
 
 - **It publishes nothing.** `contracts-events` registers no `activity.*` topic, so there is no
-  outbox table, no relay job and no signing secret in the deploy (`src/migrations.ts:11-16`).
+  outbox table, no relay job and no signing secret in the deploy (`src/migrations.ts`).
 - **It never edits a row.** Not by convention — a trigger refuses `UPDATE` outright
-  (`src/migrations.ts:126-135`). A correction is a new record.
+  (`src/migrations.ts`). A correction is a new record.
 
 ---
 
 ## 1. Routes
 
-Read out of `buildRoutes()` at `src/server.ts:277-406`. There is no path prefix: paths are exactly
+Read out of `buildRoutes()` at `src/server.ts`. There is no path prefix: paths are exactly
 as written, unversioned.
 
 | Method | Path | Who may call it | `Idempotency-Key` | What it does |
 | --- | --- | --- | --- | --- |
-| `GET` | `/livez` | anyone | no | Static liveness. Consults nothing, deliberately — a liveness probe that dials a dependency restarts a healthy process every time the database blinks (`:282-287`). |
-| `GET` | `/readyz` | anyone | no | Lifecycle report; 503 until ready. Postgres is a hard probe, identity's JWKS a soft one (`src/index.ts:74-96`). |
-| `GET` | `/metrics` | anyone | no | Prometheus text. **Unauthenticated** — unlike Lantern and Beacon, this service does not gate its scrape. Gauges are refreshed at scrape time; a refresh failure serves the previous values rather than losing every other series (`:298-313`). |
-| `GET` | `/feed` | any authenticated principal | no | Keyset-paginated feed. A user reads their own; an operator reads whoever they name, or the **estate-wide** feed by omitting `userId`; a service token must name a `userId` and cannot reach the estate-wide query at all (`feedOwner`, `:425-434`). Filters: `limit` (1–200, default 50), `category`, `product`, `cursor`. |
-| `GET` | `/feed/:id` | owner, or an operator | no | One record. `internal` records are 403 to a non-operator, not 404 — the id is already unguessable and pretending otherwise only obstructs the operator's own investigation (`:436-446`). |
+| `GET` | `/livez` | anyone | no | Static liveness. Consults nothing, deliberately — a liveness probe that dials a dependency restarts a healthy process every time the database blinks. |
+| `GET` | `/readyz` | anyone | no | Lifecycle report; 503 until ready. Postgres is a hard probe, identity's JWKS a soft one (`src/index.ts`). |
+| `GET` | `/metrics` | anyone | no | Prometheus text. **Unauthenticated** — unlike Lantern and Beacon, this service does not gate its scrape. Gauges are refreshed at scrape time; a refresh failure serves the previous values rather than losing every other series. |
+| `GET` | `/feed` | any authenticated principal | no | Keyset-paginated feed. A user reads their own; an operator reads whoever they name, or the **estate-wide** feed by omitting `userId`; a service token must name a `userId` and cannot reach the estate-wide query at all (`feedOwner`). Filters: `limit` (1–200, default 50), `category`, `product`, `cursor`. |
+| `GET` | `/feed/:id` | owner, or an operator | no | One record. `internal` records are 403 to a non-operator, not 404 — the id is already unguessable and pretending otherwise only obstructs the operator's own investigation. |
 | `POST` | `/ingest` | **service token only** | no — see below | The only way a record is ever created. |
 
 **Nothing here takes an `Idempotency-Key`.** The five read routes have nothing to make idempotent,
@@ -44,18 +44,18 @@ choose correctly is a weaker guarantee than a key the event already carries.
 
 ### `POST /ingest`, and why the order of its four steps is the security property
 
-`src/server.ts:374-401`:
+`src/server.ts`:
 
-1. Authenticate. A **user** token is refused whatever roles it carries (`:376-379`).
-2. Read the raw bytes, capped at 256 KiB *before* buffering (`readRaw`, `:517-529`).
-3. Verify the HMAC over exactly those bytes (`src/ingest.ts:82-94`).
+1. Authenticate. A **user** token is refused whatever roles it carries.
+2. Read the raw bytes, capped at 256 KiB *before* buffering (`readRaw`).
+3. Verify the HMAC over exactly those bytes (`src/ingest.ts`).
 4. Only then parse.
 
 Parsing first would put a JSON parser in front of the authentication, reachable by anyone who can
 open a socket. And the signature is verified over the bytes that arrived, never over a
 re-serialisation — `JSON.stringify(JSON.parse(body))` differs on key order, whitespace and number
 formatting, so verifying anything else would be verifying something other than what the handler acts
-on (`src/ingest.ts:74-81`).
+on (`src/ingest.ts`).
 
 The token and the signature answer different questions and neither implies the other: the token says
 *who is calling*, the signature says *the body was not altered between the producer's outbox and this
@@ -63,7 +63,7 @@ handler*. Both are required.
 
 Replies: `201 recorded`, `200 duplicate`, `200 erased`. A redelivery is **200, not 409** — it is the
 producer doing exactly what at-least-once delivery requires of it, and an error answer would make the
-relay retry for ever (`:387-391`).
+relay retry for ever.
 
 ### What happens to a topic this build cannot classify
 
@@ -71,7 +71,7 @@ There are two ways to be behind a producer and they take the same path: a topic 
 **registry** has never heard of, and a topic the registry carries but `src/classify.ts` has no entry
 for. The second is the one that used to crash — see "Who calls it" below.
 
-It is filed, never dropped. `parseDelivery` (`src/ingest.ts:114-148`) recognises a well-formed but
+It is filed, never dropped. `parseDelivery` (`src/ingest.ts`) recognises a well-formed but
 unregistered topic and validates only the minimum a quarantine row needs — id, key, `occurredAt`,
 producer, `correlationId`, payload — rather than rejecting the whole envelope over the topic alone.
 The record lands as `category = 'unclassified'`, `visibility = 'internal'`, with its payload kept, so
@@ -80,11 +80,11 @@ the backlog gauge; the ingest logs a warning per occurrence because this is a st
 is behind its producers, not a normal outcome.
 
 `unclassified` is deliberately not one of the sixteen product categories, and a non-operator asking
-to filter by it gets a 400 (`:466-472`).
+to filter by it gets a 400.
 
 ### `identity.user.deleted` writes no feed entry
 
-It **erases** (`src/ingest.ts:186-189`). Writing "your account was deleted" into the feed of a user
+It **erases** (`src/ingest.ts`). Writing "your account was deleted" into the feed of a user
 who no longer exists would leave a row keyed on the user id we were told to forget, in a table nobody
 can read — personal data retained for no purpose, which is the thing being asked for. The inbox row
 is the acknowledgement.
@@ -112,80 +112,79 @@ flat zero.
 **If two replicas run it:** they cannot. The job row is claimed `FOR UPDATE SKIP LOCKED` by
 `@cloudsforge/jobs`, and the lease key names the contended resource rather than a row — this is an
 estate-wide sweep over one table, so what two concurrent runs would break is that they would delete
-each other's rows and each report a count that is wrong (`src/jobs.ts:9-12`).
+each other's rows and each report a count that is wrong (`src/jobs.ts`).
 
 There is **no `setInterval` in this repository**. Recurrence is the boot seed
-(`seedRecurring`, `:32-36`) plus a re-arm on the runner's `completed` event (`:48-63`) — it cannot
+(`seedRecurring`) plus a re-arm on the runner's `completed` event — it cannot
 re-arm from inside its own handler, because the runner deletes the row on success *after* the handler
 returns, so a self-enqueue would be deleted a moment later and the schedule would stop silently. A
 dead-lettered recurring job is deliberately **not** re-armed: the row stays, `jobs_dead_total`
 increments and `jobs_overdue` climbs, which is how an operator finds out.
 
 Gauges (`jobs_pending`, `jobs_overdue`, `activity_unclassified_total`) are sampled on scrape rather
-than on a timer (`src/index.ts:117-125`).
+than on a timer (`src/index.ts`).
 
 ---
 
 ## 3. The database
 
-Three migrations (`src/migrations.ts:39-138`), run **only** by `src/migrator.ts`. The service asserts
-the schema version at boot and exits rather than serving below it (`src/index.ts:52-61`) — a replica
+Three migrations (`src/migrations.ts`), run **only** by `src/migrator.ts`. The service asserts
+the schema version at boot and exits rather than serving below it (`src/index.ts`) — a replica
 of new code answering against an old schema corrupts data quietly, whereas a container that refuses
 to start is a deploy that visibly stops.
 
 | Table | Purpose |
 | --- | --- |
-| `jobs` | The lease table, taken verbatim from `JOBS_SCHEMA_SQL` rather than hand-copied (`:47`). Copying it by hand is how a service ends up without the `(kind, key)` unique constraint, which silently turns every recurring enqueue into a duplicate run. |
+| `jobs` | The lease table, taken verbatim from `JOBS_SCHEMA_SQL` rather than hand-copied. Copying it by hand is how a service ends up without the `(kind, key)` unique constraint, which silently turns every recurring enqueue into a duplicate run. |
 | `inbox` | `(topic, event_id)` — the effectively-once guard. |
 | `activity_records` | The feed. |
 
 ### The constraints that carry meaning
 
-- **`inbox` primary key `(topic, event_id)`** (`:55-60`). Delivery is at-least-once; the consumer is
+- **`inbox` primary key `(topic, event_id)`**. Delivery is at-least-once; the consumer is
   what makes it effectively-once. The insert and the record insert share **one transaction**
-  (`src/ingest.ts:166-207`), so a handler that fails leaves no inbox row and the redelivery is
+  (`src/ingest.ts`), so a handler that fails leaves no inbox row and the redelivery is
   processed rather than swallowed. "Record, then handle" is the naive version of this, and it loses
   events.
 
-- **`activity_records_source_uniq unique (source_event_id)`** (`:98`). Not redundant with the inbox,
+- **`activity_records_source_uniq unique (source_event_id)`**. Not redundant with the inbox,
   and not two dedupes that can disagree — they are written in the same transaction. The inbox row is
   the generic *handler-once* guard; this is the *table invariant*, and it is the one that still holds
   if some future code path writes a record by another route. A constraint that exists only in
   application logic is a constraint that holds until the second caller. It is also what makes the
   prune job safe to get slightly wrong: prune a row while its producer could still redeliver and the
-  redelivery is treated as new — and then refused here (`src/jobs.ts:73-78`).
+  redelivery is treated as new — and then refused here (`src/jobs.ts`).
 
-- **The immutability trigger `activity_records_immutable`** (`:126-135`). `UPDATE` raises. A feed
+- **The immutability trigger `activity_records_immutable`**. `UPDATE` raises. A feed
   entry that can be edited after the fact is not a record of what happened, it is a record of what
   somebody last said happened, and the two are indistinguishable afterwards. **`DELETE` is still
   allowed**, deliberately: erasure under `identity.user.deleted` removes the row entirely, which is a
   different claim from rewriting it to say something else.
 
-- **`activity_records_category`** (`:99`) is rendered from `STORED_CATEGORIES` in TypeScript
-  (`:36`), so the column and the union cannot drift. Same for `visibility` (`:100`).
+- **`activity_records_category`** is rendered from `STORED_CATEGORIES` in TypeScript, so the column and the union cannot drift. Same for `visibility`.
 
-- **`amount` is `text` with a numeric-shape CHECK** (`:87`, `:101`). Not `numeric(40,18)`, which
+- **`amount` is `text` with a numeric-shape CHECK**. Not `numeric(40,18)`, which
   would return `10.000000000000000000` for a deposit of 10 — a feed that reformats a user's money is
   a feed they do not trust. The producer's exact decimal is preserved and the CHECK is what keeps it
   a number.
 
-- **`user_id` is nullable** (`:75`). A reconciliation run and a chain-level fault are domain events
+- **`user_id` is nullable**. A reconciliation run and a chain-level fault are domain events
   worth a permanent record and have no owner. A synthetic owner would put them in somebody's feed.
 
-- **`occurred_at` is the ordering key, not `recorded_at`** (`:78`). A feed ordered by arrival
+- **`occurred_at` is the ordering key, not `recorded_at`**. A feed ordered by arrival
   reorders itself whenever a producer retries.
 
 Four indexes exist so that every filter combination is a prefix of one of them and a page is an index
-scan rather than a sort of the user's whole history (`:107-118`).
+scan rather than a sort of the user's whole history.
 
 ---
 
 ## 4. Configuration
 
-Declared in `src/env.ts:149-170`; `.env.example` mirrors it exactly, and the two agree — every
+Declared in `src/env.ts`; `.env.example` mirrors it exactly, and the two agree — every
 variable in one appears in the other, with the same defaults.
 
-Validation happens **at import**, so a bad value exits before the logger exists. `src/env.ts:182-194`
+Validation happens **at import**, so a bad value exits before the logger exists. `src/env.ts`
 writes the fatal line by hand from a literal rather than through telemetry, because nothing that can
 itself fail may sit between a configuration error and the report of it.
 
@@ -194,9 +193,9 @@ itself fail may sit between a configuration error and the report of it.
 | Variable | What breaks if it is wrong |
 | --- | --- |
 | `ACTIVITY_DATABASE_URL` | Nothing starts. This is the **only** connection string this service may read; CI greps for a second one (rule 1). |
-| `IDENTITY_JWKS_URL` | Every authenticated route answers **503 `verifier_unavailable`**, not 401 — answering 401 would sign every user in the estate out because identity is having a bad minute (`src/server.ts:245-250`). |
+| `IDENTITY_JWKS_URL` | Every authenticated route answers **503 `verifier_unavailable`**, not 401 — answering 401 would sign every user in the estate out because identity is having a bad minute (`src/server.ts`). |
 | `IDENTITY_ISSUER` | Tokens minted by identity fail issuer validation; the same 503/401 surface. |
-| `ACTIVITY_INGEST_SECRETS` | Ingest refuses everything. A **comma-separated list, newest first**, each one GENERATED with `openssl rand -base64 48`, maximum four (`:98-108`). It is a list because rotation must not require every producer in the estate and this service to change in the same instant — and a single-secret variable is how a secret ends up never being rotated at all. **Each entry is held to a SHAPE, not to a deny-list**: base64 or hex only, at least 32 decoded bytes rather than 24 keystrokes, and a measured entropy floor. The old rule was a list of known-bad strings plus a 24-character floor, and it could not have refused `estate-only-outbox-secret-…` — 40 characters, on nobody's list — which is what that key actually was on 54 lines of a public compose file (micro-org #142). There is no NODE_ENV or CI exemption, and the entry on its way OUT of a rotation gets the same bar as the one coming in. Verifying against a rotated-out key logs a warning, so an operator can see when the window may be closed (`src/ingest.ts:89-93`). |
+| `ACTIVITY_INGEST_SECRETS` | Ingest refuses everything. A **comma-separated list, newest first**, each one GENERATED with `openssl rand -base64 48`, maximum four. It is a list because rotation must not require every producer in the estate and this service to change in the same instant — and a single-secret variable is how a secret ends up never being rotated at all. **Each entry is held to a SHAPE, not to a deny-list**: base64 or hex only, at least 32 decoded bytes rather than 24 keystrokes, and a measured entropy floor. The old rule was a list of known-bad strings plus a 24-character floor, and it could not have refused `estate-only-outbox-secret-…` — 40 characters, on nobody's list — which is what that key actually was on 54 lines of a public compose file (micro-org #142). There is no NODE_ENV or CI exemption, and the entry on its way OUT of a rotation gets the same bar as the one coming in. Verifying against a rotated-out key logs a warning, so an operator can see when the window may be closed (`src/ingest.ts`). |
 
 ### Optional
 
@@ -223,7 +222,7 @@ boot. Nothing needs to be set: an estate that configures none of this still enfo
 
 `OUTBOX_SIGNING_SECRET` is absent deliberately — this service publishes nothing. `OTEL_*` is read by
 the OpenTelemetry SDK loaded ahead of the process, not by `src/env.ts`, so under rule 9 it is not
-declared here (`src/index.ts:10-13`).
+declared here (`src/index.ts`).
 
 ---
 
@@ -231,8 +230,8 @@ declared here (`src/index.ts:10-13`).
 
 | Upstream | What it calls | Verified at | When it is down |
 | --- | --- | --- | --- |
-| Postgres | its own database only | `src/index.ts:45-50` | **Fail-closed.** `/readyz` reports not-ready via a hard probe and the balancer takes the replica out. |
-| Identity | `IDENTITY_JWKS_URL` — JWKS fetch only, by `@cloudsforge/auth`'s `Verifier` | `src/index.ts:100` | **Soft probe, and 503 rather than 401 on the request path** (`src/index.ts:87-96`, `src/server.ts:245-250`). Marking it hard would remove every service in the estate from its balancer on one identity blip, which is a cascade rather than a safety measure. It matters more here than elsewhere: ingest is authenticated by a signature *as well as* a token, so a feed that stopped ingesting because identity blinked would fall behind for a reason unrelated to anything it does. |
+| Postgres | its own database only | `src/index.ts` | **Fail-closed.** `/readyz` reports not-ready via a hard probe and the balancer takes the replica out. |
+| Identity | `IDENTITY_JWKS_URL` — JWKS fetch only, by `@cloudsforge/auth`'s `Verifier` | `src/index.ts` | **Soft probe, and 503 rather than 401 on the request path** (`src/index.ts`, `src/server.ts`). Marking it hard would remove every service in the estate from its balancer on one identity blip, which is a cascade rather than a safety measure. It matters more here than elsewhere: ingest is authenticated by a signature *as well as* a token, so a feed that stopped ingesting because identity blinked would fall behind for a reason unrelated to anything it does. |
 
 **Nothing else.** It makes no outbound call to any domain service. Producers push to it; it pulls from
 nobody.
@@ -253,7 +252,7 @@ and a registered topic with no local classifier quarantines. It used to derefere
 
 Seven of the sixteen categories — `transfer` beyond ledger entries, `conversion`, `ownership`,
 `trading`, `reward`, `community`, `api` — have no producer yet. The set describes what the feed
-covers, not what has happened so far (`src/categories.ts:10-13`).
+covers, not what has happened so far (`src/categories.ts`).
 
 ---
 
@@ -279,7 +278,7 @@ ACTIVITY_TEST_DATABASE_URL=postgres://cloudsforge:CHANGE_ME@127.0.0.1:5432/activ
 
 `--test-concurrency=1` is in the `test` script and is **required, not a preference**: `node:test` runs
 files in parallel by default, a `TRUNCATE` takes an `AccessExclusiveLock`, and one file's reset
-deadlocks against another file's inserts with `40P01` (`package.json:13`).
+deadlocks against another file's inserts with `40P01` (`package.json`).
 
 Without the DSN the database-backed cases skip. That is the estate's known green-while-proving-nothing
 failure mode (18-build-status §3.3) — CI supplies the DSN so it does not happen there.
@@ -294,7 +293,7 @@ failure mode (18-build-status §3.3) — CI supplies the DSN so it does not happ
   reachable from where, not a service one.
 - **Seven categories have no producer.** Listed above; each is waiting on a service to publish its
   own topic rather than on anything in this repository.
-- **`ledger.entry.posted` is filed as `transfer`** (`src/classify.ts:176-181`), which is the honest
+- **`ledger.entry.posted` is filed as `transfer`** (`src/classify.ts`), which is the honest
   category and not the useful one: the entry itself does not know whether it was a purchase, a reward
   or a conversion. Those land better once billing, market and trade publish their own topics.
 - **No frontend topic is registered anywhere in the estate** (18-build-status §3.3l), so nothing

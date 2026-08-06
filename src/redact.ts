@@ -14,7 +14,7 @@
  * ## It happened while this was being written
  *
  * `identity.email.verification_requested` was registered in `contracts-events` and its payload is
- * (`identity/src/emailVerification.ts:172-185`):
+ * (`identity/src/emailVerification.ts`):
  *
  *     { userId, handle, email, expiresAt, linkable, verifyUrl? }
  *
