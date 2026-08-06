@@ -1,12 +1,14 @@
 {
   "name": "@cloudsforge/activity",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "The canonical activity feed. Subscribes to every domain topic and writes one immutable activity_record per user-visible event. Written only from the event bus.",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node --import tsx src/index.ts",
     "migrate": "node --import tsx src/migrator.ts",
