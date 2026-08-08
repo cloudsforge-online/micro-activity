@@ -29,10 +29,16 @@
     "'link:' symlinks the package in place and lets it keep using its own node_modules.",
     "",
     "tsx is a runtime dependency for the same reason: the unpublished packages resolve to their",
-    "TypeScript sources."
+    "TypeScript sources.",
+    "",
+    "@cloudsforge/contracts-chain is a RUNTIME dependency and not a dev one, for the same reason",
+    "micro-notify's is: classify.ts asks it a question while classifying — RETIRED_ASSETS, so that",
+    "no summary can name a wound-down asset to a player whatever a producer sends (micro-org #227).",
+    "A guard that only existed under `pnpm test` would not be a guard."
   ],
   "dependencies": {
     "@cloudsforge/auth": "file:../runtime/packages/auth",
+    "@cloudsforge/contracts-chain": "link:../contracts/packages/chain",
     "@cloudsforge/contracts-events": "link:../contracts/packages/events",
     "@cloudsforge/db": "file:../runtime/packages/db",
     "@cloudsforge/jobs": "file:../runtime/packages/jobs",
