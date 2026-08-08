@@ -444,6 +444,51 @@ export const CLASSIFIERS = Object.freeze({
         ? 'We sent a link to verify your email address. It can be used once and expires in 24 hours.'
         : 'Your email address was asked to be verified, but no link could be built for it.',
   },
+  /**
+   * The sibling of the entry above, and classified differently on purpose.
+   *
+   * Its payload is `{ userId, handle, email, expiresAt, issuedByOperator, linkable, resetUrl? }`
+   * (`identity/src/passwordReset.ts`), and three of those are fields this table must never hold:
+   * `email` and `handle` are direct identifiers, and `resetUrl` is a **live single-use credential**
+   * — a thirty-minute one, which is a shorter fuse than the verification link's twenty-four hours
+   * and therefore a worse thing to have copied into a row nothing deletes. `payloadKeys` names two
+   * fields and neither of them is any of those three.
+   *
+   * `security`, not `account`. The entry above argues for `account` because email verification is
+   * the account not yet being finished, and that argument does not transfer: this is a request to
+   * REPLACE THE CREDENTIAL, and `contracts/packages/events/src/audit.ts` audits it on exactly that
+   * reasoning — "who asked to replace the credential on this account, and when" is where every
+   * dispute about a compromised account starts. A user scanning their own timeline because they
+   * think someone got in wants this beside the session revocations and the MFA changes, not beside
+   * their registration. Both categories retain for 730 days (`retention.ts`: `personal`), so this
+   * chooses a shelf and not a lifetime.
+   *
+   * `issuedByOperator` is declared and read, and that is the whole reason it is declared. The
+   * producer put a boolean on the event rather than the operator's id — "whether an operator issued
+   * it, never WHICH operator" (`passwordReset.ts`) — so the one fact a user needs is available
+   * without naming a staff member in somebody's feed. "You asked for this" and "support started
+   * this for you" are different events to the person reading the line, and collapsing them would
+   * make the timeline useless for the case it exists to serve.
+   *
+   * The summary never carries the link and never names the address, and `linkable` is always
+   * present by the producer's design, so a deployment with no `IDENTITY_ACCOUNT_URL` reads as the
+   * different fact it is rather than as a silent nothing. micro-org#263.
+   */
+  'identity.password.reset_requested': {
+    payloadKeys: ['linkable', 'issuedByOperator'],
+    category: 'security',
+    type: 'security.password_reset_requested',
+    visibility: 'user',
+    // Keyed by user_id, as the registry says and as the emit does (`passwordReset.ts`).
+    userId: userFromKey,
+    summary: (event) => {
+      const payload = payloadOf(event)
+      const who = payload['issuedByOperator'] === true ? 'Support started' : 'You asked for'
+      return payload['linkable'] === true
+        ? `${who} a password reset for your account. The link can be used once and expires in 30 minutes.`
+        : `${who} a password reset for your account, but no link could be built for it.`
+    },
+  },
   'identity.user.deleted': {
     payloadKeys: [],
     category: 'account',
