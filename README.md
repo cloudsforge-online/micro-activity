@@ -128,16 +128,25 @@ than on a timer (`src/index.ts`).
 
 ## 3. The database
 
-Three migrations (`src/migrations.ts`), run **only** by `src/migrator.ts`. The service asserts
-the schema version at boot and exits rather than serving below it (`src/index.ts`) — a replica
-of new code answering against an old schema corrupts data quietly, whereas a container that refuses
-to start is a deploy that visibly stops.
+The schema is a list of versioned migrations in `src/migrations.ts`, run **only** by
+`src/migrator.ts`. **How many there are is deliberately not written down here.** `SCHEMA_VERSION` is
+computed at the foot of that file as the highest `version` in `MIGRATIONS`, so the number is derived
+from the list rather than typed beside it — and this paragraph is why that matters, because it read
+"three migrations" for as long as there had been four. Migration 4 (`retention`) landed and the
+sentence did not. A count in prose is a claim nothing recomputes; `src/migrations.ts` is the one that
+does.
 
-| Table | Purpose |
+The service asserts that version at boot and exits rather than serving below it
+(`assertSchemaAtLeast(sql, SCHEMA_VERSION)`, `src/index.ts`) — a replica of new code answering
+against an old schema corrupts data quietly, whereas a container that refuses to start is a deploy
+that visibly stops.
+
+| Relation | Purpose |
 | --- | --- |
 | `jobs` | The lease table, taken verbatim from `JOBS_SCHEMA_SQL` rather than hand-copied. Copying it by hand is how a service ends up without the `(kind, key)` unique constraint, which silently turns every recurring enqueue into a duplicate run. |
 | `inbox` | `(topic, event_id)` — the effectively-once guard. |
 | `activity_records` | The feed. |
+| `activity_records_retention` | A **view**, not a table — migration 4 added no table, it added a `retention_class` column to `activity_records` and this. It answers "which rows are overdue" in one query on a morning when nothing has run for a month, and `src/index.ts` scrapes it into `activity_retention_overdue_total`, which is the alarm for the prune job having died. |
 
 ### The constraints that carry meaning
 
@@ -174,8 +183,12 @@ to start is a deploy that visibly stops.
 - **`occurred_at` is the ordering key, not `recorded_at`**. A feed ordered by arrival
   reorders itself whenever a producer retries.
 
-Four indexes exist so that every filter combination is a prefix of one of them and a page is an index
-scan rather than a sort of the user's whole history.
+The indexes on `activity_records` exist so that every filter combination the feed offers is a prefix
+of one of them and a page is an index scan rather than a sort of the user's whole history. The prune
+job has its own, leading with `retention_class`, so a sweep is a range scan over one class rather
+than a scan of the whole table per run. Their number is not given here for the same reason the
+migration count is not: this sentence said "four" from the day migration 4 added the fifth. They are
+declared beside the tables they index in `src/migrations.ts`.
 
 ---
 
