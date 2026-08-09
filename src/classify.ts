@@ -32,6 +32,10 @@ import {
   type ProducerService,
   type TopicName,
 } from '@cloudsforge/contracts-events'
+// A runtime dependency, not a dev one: `seasonRewardSummary` below asks this list a question on
+// the classification path, so that no rule can name a wound-down asset to a player however the
+// producer spells its payload. See that function's header for the whole argument.
+import { RETIRED_ASSETS } from '@cloudsforge/contracts-chain'
 import { UNCLASSIFIED, type Category, type StoredCategory, type Visibility } from './categories.ts'
 import { redactPayload } from './redact.ts'
 
@@ -251,6 +255,114 @@ function emberFromWei(value: unknown): string | null {
   const whole = wei / WEI_PER_EMBER
   const fraction = (wei % WEI_PER_EMBER).toString().padStart(18, '0').replace(/0+$/, '')
   return fraction.length === 0 ? whole.toString() : `${whole.toString()}.${fraction}`
+}
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * ── WHAT A SEASON REWARD IS CALLED, AND WHY THE UNIT IS NOT WRITTEN INTO THE SENTENCE ─────────
+ *
+ * Both reward rules — `worlds.reward.granted` and `emberkin.reward.granted` — used to end
+ *
+ *     `You earned ${amount} Shards.`
+ *
+ * with the unit typed into the copy. SHARD is RETIRED: `RETIRED_ASSETS = Object.freeze(['SHARD'])`
+ * (`contracts/packages/chain/src/index.ts:58`), whose own comment is that nothing may be **newly**
+ * denominated in it — and a season reward is exactly a new denomination, announced to the player
+ * who has just been given it. micro-org #227 is the sweep that found this; it spans seven
+ * repositories and it is the third time a retired asset has reached a user surface (#15, #182).
+ *
+ * ── WHAT THE PRODUCERS ACTUALLY PUT ON THE WIRE, READ AT BOTH EMIT SITES ──────────────────────
+ *
+ *   - `worlds/src/rewards.ts:555-574` (`grantReward`) emits `{ rewardId, seasonId, titleId,
+ *     userId, reason, amountShards, journalEntryId, budgetRemainingShards }`.
+ *   - `emberkin/src/seasons.ts:136-142` (`grantSeasonReward`) emits `{ seasonId, userId, reason,
+ *     amount, journalEntryId }`.
+ *
+ * **Neither carries an asset code.** The old sentence did not read one either — "Shards" was a
+ * word in THIS file, and the only thing on either payload pointing at an asset was the NAME of
+ * worlds' `amountShards` field. A field name is the producer's wire contract and no person ever
+ * reads it; a summary is read by a person. Those are not the same claim, which is why reading a
+ * field called `amountShards` below is not the defect being closed here.
+ *
+ * ── AND THE OBVIOUS SUBSTITUTION — EMBER FOR SHARDS — WOULD HAVE BEEN A WORSE LINE ────────────
+ *
+ * Both services credit the player in SHARD today, at HEAD: `rewardPostings` builds every posting
+ * with `assetCode: 'SHARD'` against `engagementAccount(<programme>, 'SHARD')` —
+ * `worlds/src/ledgerclient.ts:155-183`, `emberkin/src/ledgerclient.ts:116-141`. So "You earned
+ * 250 EMBER." would be a feed row the ledger contradicts, and a unit this service picked on
+ * behalf of the service that moved the money. Where the engagement programmes re-denominate is
+ * #226 and it is theirs to decide. #227's own later paragraph is the accurate description of
+ * these two lines: surfaces labelling "genuinely SHARD-denominated ledger data … need the
+ * underlying re-denomination, not a find-and-replace".
+ *
+ * ── SO: AN AMOUNT AND A CODE THE PRODUCER SENT, OR NO UNIT AND NO FIGURE ──────────────────────
+ *
+ * A quantity with no unit is not a smaller version of the truth. "You earned 250." is a number
+ * the reader supplies their own unit for — the same shape `money`'s header above refuses for
+ * scale and `settlement.sweep.completed` refuses longhand. So the figure travels with its unit or
+ * it does not travel: an amount AND an asset code the producer sent, else the sentence that names
+ * the reward without quantifying it. Nothing is lost that was ever knowable here — both payloads
+ * declare their amount field, so the producer's own figure survives verbatim in
+ * `activity_records.payload`, in its own units, where it is a labelled field rather than money.
+ *
+ * The asset-code branch is DEAD against both of today's payloads and is written anyway. It is
+ * what makes this outlive #226: the day either producer puts `assetCode` on its event both
+ * summaries begin reading "250 EMBER" with no edit here, and no unit will ever have been typed
+ * into this file to get there. Same shape as `wallet.withdrawal.requested`, which declines a
+ * figure until wallet emits `amountFormatted` and then prints it with no change in this file.
+ *
+ * ── A RETIRED CODE IS REFUSED EVEN WHEN THE PRODUCER DOES SEND IT, WHICH IS A JUDGEMENT ───────
+ *
+ * Elsewhere in this file rendering SHARD is CORRECT: `wallet.deposit.confirmed` says "A SHARD
+ * deposit was confirmed and credited." from the code on its payload, because a deposit is a past
+ * fact that really was denominated that way — the argument that also keeps
+ * `mint-web/src/lib/format.ts` showing a pre-migration order as "2,500 SHARD". A reward is not
+ * that. It is news about something a player has just been given, in an asset the estate is
+ * winding down. So this ONE reader consults `RETIRED_ASSETS` — the estate's LIST, never the
+ * string "SHARD", so it extends itself the next time an asset is retired.
+ *
+ * ── ONE FUNCTION, BECAUSE THE TWO RULES DISAGREEING IS PART OF WHAT #227 REPORTS ──────────────
+ *
+ * micro-notify's row of #227 reaches the same answer for the same two topics from the other side
+ * of the bus, independently: `rewardNameOf` (`notify/src/catalogue.ts:521`, on that repository's
+ * `fix/reward-name-derives-its-unit`) renders "a reward" where this renders "You earned a season
+ * reward.", refuses a retired code on the delivery path, and carries the same dead asset-code
+ * branch. Two services describing one event in two different denominations is how a player's feed
+ * and their email end up disagreeing, and it is what #227 §2 reports about this pair: notify
+ * appended "Shards" on emberkin's rule and nothing at all on worlds'. Neither was a decision;
+ * each was what its author wrote on the day.
+ *
+ * `amountField` is a parameter rather than a probe of every spelling, and that is the allowlist
+ * rather than taste: a classifier may not read a payload key it has not declared, and reading
+ * emberkin's `amount` on worlds' topic — or worlds' `amountShards` on emberkin's — either fails
+ * that test or forces a declaration claiming a payload carries a field it does not. `assetCode`
+ * needs no such parameter: it is one of the generic keys `classify` already probes on every
+ * topic for the record's own column.
+ *
+ * ── ONE THING THIS DOES NOT FIX, RECORDED RATHER THAN SMUGGLED IN ─────────────────────────────
+ *
+ * emberkin's `amount` still reaches the record's `amount` COLUMN through `money` — emberkin is
+ * not a smallest-units producer — while its `assetCode` column stays null, and
+ * `hub-web/src/pages/activity.tsx:207-213` renders the figure with an empty code beside it. That
+ * is a figure without a unit one column to the right of the one repaired here, and it is the same
+ * hole: it closes when the producers name their asset, which is #226's re-denomination, not a
+ * classifier's to invent.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════ */
+function seasonRewardSummary(envelope: EventEnvelope, amountField: string): string {
+  // `amount` plus the producer set rather than `money`: `money` probes `<field>Formatted`, which
+  // for worlds spells `amountShardsFormatted` — a field worlds does not send and this file may not
+  // declare, because a declaration states that the payload really carries it. The half of `money`'s
+  // rule that can bite here is kept as it is: if either producer ever emits smallest units it joins
+  // SMALLEST_UNIT_PRODUCERS and this declines the figure with no change in this function.
+  const raw = amount(envelope, amountField)
+  const value = raw !== null && SMALLEST_UNIT_PRODUCERS.has(envelope.producer) ? null : raw
+  const code = asset(envelope)
+  // `asset` already requires `/^[A-Z]…/`, so there is no case folding to do; the cast is because
+  // `RETIRED_ASSETS` is `readonly AssetCode[]` and this string is a producer's, not this file's —
+  // narrowing it to `AssetCode` first would assert the very thing being asked.
+  const retired = code !== null && (RETIRED_ASSETS as readonly string[]).includes(code)
+  if (value !== null && code !== null && !retired) return `You earned ${value} ${code}.`
+  return 'You earned a season reward.'
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -1165,10 +1277,10 @@ export const CLASSIFIERS = Object.freeze({
     visibility: 'user',
     // Keyed by REWARD id; the user is in the payload (`worlds/src/rewards.ts`).
     userId: userFromPayload,
-    summary: (event) => {
-      const amount = text(event, 'amountShards', 24)
-      return amount ? `You earned ${amount} Shards.` : 'You earned a season reward.'
-    },
+    // `amountShards` is worlds' spelling of the figure (`worlds/src/rewards.ts:564`) and the only
+    // asset-ish thing on the payload. `seasonRewardSummary` has the whole argument for why a
+    // field NAME saying shards does not put "Shards" in a sentence a player reads.
+    summary: (event) => seasonRewardSummary(event, 'amountShards'),
   },
   'worlds.provision.completed': {
     payloadKeys: ['subject'],
@@ -1253,10 +1365,10 @@ export const CLASSIFIERS = Object.freeze({
     visibility: 'user',
     // Keyed by idempotency key; user in the payload (`emberkin/src/seasons.ts`).
     userId: userFromPayload,
-    summary: (event) => {
-      const amount = text(event, 'amount', 24)
-      return amount ? `You earned ${amount} Shards.` : 'You earned a season reward.'
-    },
+    // The same function as worlds' rule, on emberkin's spelling of the figure
+    // (`emberkin/src/seasons.ts:139`). The two rules saying different things about the same
+    // event is half of what micro-org #227 reports about this pair.
+    summary: (event) => seasonRewardSummary(event, 'amount'),
   },
   'aetherholm.season.opened': {
     payloadKeys: ['name'],

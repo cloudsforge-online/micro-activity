@@ -21,6 +21,7 @@ import {
   type Actor,
   type TopicName,
 } from '@cloudsforge/contracts-events'
+import { RETIRED_ASSETS } from '@cloudsforge/contracts-chain'
 import { CATEGORIES, STORED_CATEGORIES, UNCLASSIFIED, isCategory } from './categories.ts'
 import { CLASSIFIED_TOPICS, CLASSIFIERS, classify, subjectUrnFor } from './classify.ts'
 import { BadCursorError, decodeCursor, encodeCursor } from './records.ts'
@@ -1086,6 +1087,183 @@ test('a withdrawal requested and one completed name the asset and decline the fi
     assert.equal(record.userId, ALICE)
     assert.equal(record.visibility, 'user')
     assert.equal(record.assetCode, 'SHARD')
+  }
+})
+
+/* ------------------------------------------------------------------ the retired asset */
+
+/**
+ * ═════════════════════════════════════════════════════════════════════════════════════════════
+ * ── THE SENTENCE THAT NAMED A WOUND-DOWN ASSET, AND THE THREE TESTS THAT REPLACE IT ──────────
+ *
+ * Both reward rules ended `` `You earned ${amount} Shards.` `` — the unit typed into `classify.ts`
+ * rather than read off anything — so a player who finished a season read "You earned 250 Shards."
+ * in their feed. SHARD is RETIRED (`RETIRED_ASSETS`, `contracts/packages/chain/src/index.ts:58`)
+ * and nothing may be newly denominated in it. micro-org #227 is the estate sweep; this repository
+ * is one row of seven.
+ *
+ * **No test pinned that string, which is its own finding.** micro-notify's did — `catalogue.test.ts`
+ * asserted `params['rewardName'] === '250 Shards'` under the name "names the Shards", so its suite
+ * was green BECAUSE of the defect and any correction to the copy turned it red. Nothing here was
+ * locked in the same way; these two summaries were simply never asserted at all, by 92 tests that
+ * covered every neighbouring rule. An unasserted user-visible sentence is the cheaper version of
+ * the same failure, and it is what the three tests below close:
+ *
+ *   1. with no asset code on the event — which is every real event today — no unit is rendered and
+ *      BOTH rules render the same sentence, because they now share `seasonRewardSummary`;
+ *   2. with an asset code on the event, the code rendered is the one the payload named, so the
+ *      unit is derived and not chosen here;
+ *   3. no summary this build can produce names a retired asset — asserted against `RETIRED_ASSETS`
+ *      itself rather than against the word "Shards", so it extends itself the next time an asset
+ *      is wound down, and driven over every registered topic rather than over these two.
+ *
+ * The payloads are the producers' real ones, read at the emit sites: `worlds/src/rewards.ts:555-574`
+ * and `emberkin/src/seasons.ts:136-142`. Neither carries an asset code. Both services nevertheless
+ * credit the player in SHARD (`rewardPostings`, `worlds/src/ledgerclient.ts:155-183` and
+ * `emberkin/src/ledgerclient.ts:116-141`), which is why "EMBER" would have been a worse fix than
+ * the defect: a unit this service invented on behalf of the one that moved the money.
+ * ═════════════════════════════════════════════════════════════════════════════════════════════ */
+const REWARD_EVENTS = [
+  {
+    topic: 'worlds.reward.granted' as TopicName,
+    // Keyed by reward id (`worlds/src/rewards.ts` — `key: granted.id`), so the user has to come
+    // off the payload; asserted below, because a reward in nobody's feed is the other way this
+    // pair has failed before.
+    key: 'grant-7',
+    payload: {
+      rewardId: 'grant-7',
+      seasonId: 'season-1',
+      titleId: 'title-3',
+      userId: ALICE,
+      reason: 'objective:first-build',
+      amountShards: '250',
+      journalEntryId: 'j-9',
+      budgetRemainingShards: '9750',
+    } as Record<string, unknown>,
+  },
+  {
+    topic: 'emberkin.reward.granted' as TopicName,
+    // Keyed by the idempotency key (`emberkin/src/seasons.ts` — `key`), which is not a uuid.
+    key: `season-1:${ALICE}:pass`,
+    payload: {
+      seasonId: 'season-1',
+      userId: ALICE,
+      reason: 'season placement',
+      amount: '250',
+      journalEntryId: 'j-9',
+    } as Record<string, unknown>,
+  },
+] as const
+
+test('a season reward whose event names no asset names no unit, in both rules', () => {
+  const summaries: string[] = []
+  for (const each of REWARD_EVENTS) {
+    const classified = classify(
+      delivery({ topic: each.topic, key: each.key, payload: each.payload }).envelope,
+      true,
+    )
+    assert.equal(classified.category, 'reward', each.topic)
+    assert.equal(classified.userId, ALICE, each.topic)
+    assert.equal(classified.visibility, 'user', each.topic)
+    // The sentence a player actually read, asserted as a string so the regression cannot come
+    // back through a reworded summary — the shape `wallet.deposit.confirmed` uses one section up.
+    assert.notEqual(classified.summary, 'You earned 250 Shards.', each.topic)
+    // Not "You earned 250." either. A quantity whose unit the reader supplies is the shape this
+    // file calls a plausible screen over nothing, and `money`'s header refuses it for scale for
+    // exactly the same reason. The figure is not lost: both rules declare their amount field, so
+    // the producer's own number is in `activity_records.payload` in its own units.
+    assert.doesNotMatch(classified.summary, /250/, each.topic)
+    summaries.push(classified.summary)
+  }
+  // One function, so one sentence. The two rules disagreeing — emberkin appending a unit, worlds
+  // appending none, in micro-notify's copy of this same pair — is half of what #227 reports.
+  assert.deepEqual(summaries, ['You earned a season reward.', 'You earned a season reward.'])
+})
+
+test('a season reward whose event DOES name an asset renders that code, derived', () => {
+  // Dead against both of today's payloads and written anyway: this is the branch that makes the
+  // repair outlive the re-denomination in micro-org #226. The day either producer puts `assetCode`
+  // on its event both summaries begin naming it with no edit to `classify.ts`, which is the whole
+  // point of never having typed a unit into it. EMBER appears below only because the payload says
+  // EMBER — change the payload and this assertion has to change with it, which is the difference
+  // between a derived unit and a second hard-coded one. BTC is the second half of that proof.
+  for (const each of REWARD_EVENTS) {
+    for (const [code, expected] of [
+      ['EMBER', 'You earned 250 EMBER.'],
+      ['BTC', 'You earned 250 BTC.'],
+    ] as const) {
+      const classified = classify(
+        delivery({
+          topic: each.topic,
+          key: each.key,
+          payload: { ...each.payload, assetCode: code },
+        }).envelope,
+        true,
+      )
+      assert.equal(classified.summary, expected, `${each.topic} with ${code}`)
+      // And the code reaches the record's own column, from the same payload field.
+      assert.equal(classified.assetCode, code, each.topic)
+    }
+  }
+})
+
+test('THE RULE: no summary names a retired asset the payload did not', () => {
+  // Bound to the estate's LIST rather than to the word "Shards": the list is the thing being
+  // defended, and an assertion naming SHARD would need editing on the day EMBER is wound down —
+  // exactly the day it would need to still work. Matched case-insensitively because the defect
+  // was spelled "Shards" and not "SHARD", and a case-sensitive check on the asset code would have
+  // walked straight past it.
+  assert.ok(RETIRED_ASSETS.length > 0, 'no retired assets — this test would pass vacuously')
+  const retired = RETIRED_ASSETS.map((code) => new RegExp(code, 'i'))
+
+  // Driven over every registered topic, not over the two in the issue. "The two the sweep found"
+  // describes how the defect was found and not where it can occur, and the next one will be
+  // written by somebody who has never read #227. The payload deliberately carries NO asset code:
+  // a summary that names a code the producer sent is not this rule's business — `A SHARD deposit
+  // was confirmed and credited.` is CORRECT above, because a deposit is a past fact that really
+  // was denominated that way. What is refused here is a code this repository supplied itself.
+  let checked = 0
+  for (const topic of TOPIC_NAMES) {
+    const classified = classify(
+      delivery({
+        topic,
+        key: ALICE,
+        payload: {
+          userId: ALICE,
+          subject: ALICE,
+          sellerSubject: `user:${ALICE}`,
+          ownerSubject: `user:${ALICE}`,
+          amount: '250',
+          amountShards: '250',
+          price: '250',
+        },
+      }).envelope,
+      true,
+    )
+    for (const pattern of retired) {
+      assert.doesNotMatch(classified.summary, pattern, `${topic} names a retired asset unprompted`)
+    }
+    checked += 1
+  }
+  assert.equal(checked, TOPIC_NAMES.length)
+
+  // …and the two reward rules refuse a retired code even when the producer DOES send one, which
+  // is a judgement rather than a consequence. A reward is news about something a player has just
+  // been given, in an asset the estate is winding down — not a description of a past movement, the
+  // way `wallet.deposit.confirmed` and `mint-web/src/lib/format.ts`'s "2,500 SHARD" are. The same
+  // call micro-notify made in `rewardNameOf` for the same two topics.
+  for (const each of REWARD_EVENTS) {
+    for (const code of RETIRED_ASSETS) {
+      const classified = classify(
+        delivery({
+          topic: each.topic,
+          key: each.key,
+          payload: { ...each.payload, assetCode: code },
+        }).envelope,
+        true,
+      )
+      assert.equal(classified.summary, 'You earned a season reward.', `${each.topic} with ${code}`)
+    }
   }
 })
 
