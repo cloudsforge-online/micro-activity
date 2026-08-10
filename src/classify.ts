@@ -809,6 +809,55 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   /**
+   * **The deposit topic whose news is that a balance did NOT change.**
+   *
+   * A token transfer reached its confirmation depth at a user's deposit address and no ledger
+   * entry exists for it (`wallet/src/deposits.ts`, `token_deposit_unsupported`). Every other
+   * `deposit` row in this feed is money that arrived; a user who reads this one as the same kind
+   * of news waits for a credit that is never coming, so the sentence says NOT credited, says it
+   * is not in the balance, and says it cannot be withdrawn — the registry's own description of
+   * the topic, in the user's words.
+   *
+   * **No figure, and here that is not `money` being cautious — the figure does not exist.**
+   * wallet is in `SMALLEST_UNIT_PRODUCERS` so `money` would decline it anyway, but this payload
+   * is the one case where nobody downstream could rescue it: it carries the TOKEN's own smallest
+   * units with no `amountFormatted` and no `decimals`, because wallet has no source for the
+   * decimals of a contract it does not know — `assetDecimals` throws for a `TOKEN:` code rather
+   * than assume 18, Tether being six. `amount` is therefore not declared either, and that is
+   * deliberate rather than an omission: an undeclared key is dropped at ingest, and this integer
+   * must be, because the record's `amount` COLUMN is rendered as a decimal figure beside an asset
+   * code (`hub-web/src/pages/activity.tsx`). Rendering 250731000 as an amount of USDT would be
+   * off by six orders of magnitude in the user's favour. The one surface that shows this integer
+   * shows it marked "raw units" (the wallet page's uncredited-token panel, micro-org#200).
+   *
+   * **The token is named by contract address and never by a symbol.** A symbol is whatever the
+   * contract chose to return and two contracts may both answer "USDT"; the address is the only
+   * identifier that separates the token a user holds from one impersonating it, and this row is
+   * what a support conversation about the missing money will be conducted from.
+   *
+   * `userFromPayload`, as every wallet topic: keyed by `wallet_id`, a uuid, so `userFromKey`
+   * would not fail here — it would return a well-formed, queryable, WRONG id.
+   */
+  'wallet.deposit.token_uncredited': {
+    payloadKeys: ['userId', 'chain', 'network', 'tokenAddress'],
+    category: 'deposit',
+    type: 'deposit.token_uncredited',
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: (event) => {
+      // Every declared field is read before anything branches, for the reason
+      // `wallet.deposit_address.assigned` states: the allowlist test drives this against a payload
+      // whose every key is `undefined`, and a key read only inside a taken branch looks
+      // declared-but-never-read on the run where that branch is not taken.
+      const chain = text(event, 'chain', 24)
+      const network = text(event, 'network', 24)
+      const token = text(event, 'tokenAddress', 64)
+      const which = token ? ` (contract ${token})` : ''
+      const where = chain ? ` on ${chain}${network ? ` ${network}` : ''}` : ''
+      return `A token${which} reached your deposit address${where} and was NOT credited: it is not in your balance and cannot be withdrawn.`
+    },
+  },
+  /**
    * **No figure, and it is wallet's payload that decides that rather than a preference here.**
    *
    * `WithdrawalRequestedPayload` sends `amount`, `fee` and `net` and nothing formatted

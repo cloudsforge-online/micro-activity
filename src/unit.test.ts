@@ -1042,6 +1042,67 @@ test('a deposit prints the figure wallet converted, and never the one it did not
   assert.equal(bare.amount, null)
 })
 
+test('an uncredited token names its contract, carries no figure, and says the money is not there', () => {
+  // The payload as `wallet/src/deposits.ts` emits it: a token that reached its confirmation depth
+  // at a deposit address and got no ledger entry. The figure is the TOKEN's smallest units and
+  // there is no `amountFormatted` beside it and no `decimals` anywhere on the wire, because wallet
+  // has no source for the decimals of a contract it does not know.
+  const USDT = '0xdac17f958d2ee523a2206206994597c13d831ec7'
+  const RAW = '250731000' // 250.731 USDT at six decimals — or 2.5e-10 of it at eighteen.
+  const seen = classify(
+    delivery({
+      topic: 'wallet.deposit.token_uncredited',
+      // Keyed by `wallet_id`, which is a uuid and would therefore be accepted by `userFromKey` and
+      // filed against a user who does not exist. The payload names the owner.
+      key: '5f4a1c2e-8b90-4d3f-a1e6-7c2b9d0e4f11',
+      payload: {
+        sightingId: 'ts-1',
+        userId: ALICE,
+        walletId: '5f4a1c2e-8b90-4d3f-a1e6-7c2b9d0e4f11',
+        chain: 'ethereum',
+        network: 'mainnet',
+        tokenAddress: USDT,
+        assetCode: `TOKEN:ethereum:mainnet:${USDT}`,
+        amount: RAW,
+        txHash: '0x5f2c1d4e',
+        credited: false,
+      },
+    }).envelope,
+    true,
+  )
+
+  assert.equal(seen.userId, ALICE, 'the row was filed against the wallet id rather than its owner')
+  assert.equal(seen.category, 'deposit')
+  assert.equal(
+    seen.summary,
+    `A token (contract ${USDT}) reached your deposit address on ethereum mainnet and was NOT credited: ` +
+      'it is not in your balance and cannot be withdrawn.',
+  )
+
+  // The whole of the defect this topic exists to describe, asserted three ways. The integer is not
+  // in the sentence, not in the amount COLUMN a frontend renders as a decimal beside an asset code,
+  // and not in the stored payload — `amount` is undeclared, so it is dropped at ingest rather than
+  // kept for a later reader to render at a scale nobody knows.
+  assert.equal(seen.summary.includes(RAW), false, 'an unscaled token figure reached a user sentence')
+  assert.equal(seen.amount, null)
+  assert.equal(seen.payload['amount'], undefined)
+
+  // A symbol would be the contract's own claim about itself and two contracts may both answer
+  // "USDT". The address is the only thing here that identifies the token a user actually received.
+  assert.match(seen.summary, /0xdac17f958d2ee523a2206206994597c13d831ec7/)
+
+  // A sighting whose payload lost its chain and its contract still has to be readable, because the
+  // fact that matters is not either of them.
+  const bare = classify(
+    delivery({ topic: 'wallet.deposit.token_uncredited', key: 'w-1', payload: { userId: ALICE } }).envelope,
+    true,
+  )
+  assert.equal(
+    bare.summary,
+    'A token reached your deposit address and was NOT credited: it is not in your balance and cannot be withdrawn.',
+  )
+})
+
 test('a withdrawal requested and one completed name the asset and decline the figure', () => {
   // `WithdrawalRequestedPayload` (`wallet/src/withdrawals.ts`) sends `amount`, `fee` and
   // `net` raw and nothing formatted — twenty lines below `toWithdrawal`, which converts the same
