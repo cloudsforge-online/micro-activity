@@ -382,7 +382,17 @@ const API_KEY = '99999999-9999-4999-8999-999999999999'
  * emit-site citation is the whole of the mistake this rule exists to make loud.
  */
 const ACTOR_ATTRIBUTED: readonly TopicName[] = [
+  // trade's four, and they are the strong case rather than the tolerated one: every one of these
+  // emits `user:` plus the BOT ROW's `userId` column — `insertBot`, `startBot` and `pauseBot` in
+  // `trade/src/bots.ts`, `settleFee` in `trade/src/fees.ts` — so the actor is the owner however the
+  // emit was reached and whoever pressed the button. That is a property of the producer, not an
+  // observation about who usually acts, which is the distinction `aetherholm.battle.resolved` makes
+  // expensive. trade's other three are absent on purpose: `trade.fill.settled` passes no actor at
+  // all and the other two name their user on the payload.
+  'trade.bot.created',
+  'trade.bot.started',
   'trade.bot.paused',
+  'trade.fee.settled',
   'devplatform.key.issued',
   'devplatform.key.revoked',
 ]
@@ -457,6 +467,402 @@ test('a paused bot reaches its owner — not the bot, and not whoever pressed th
   const halted = paused({ botId: BOT }, 'service:trade')
   assert.equal(halted.userId, null)
   assert.equal(halted.visibility, 'internal')
+})
+
+/* ── trade's other six. micro-org#345 ─────────────────────────────────────────────────────────
+ *
+ * Every payload below was read off the emit site in `micro-trade` on 2026-08-10 and is spelled
+ * here in full, including the fields these classifiers deliberately do not declare — a fixture
+ * trimmed to what a classifier reads cannot show that the rest is dropped, which is half of what
+ * these tests are for.
+ * ------------------------------------------------------------------------------------------ */
+
+const FILL = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const SETTLEMENT = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+const ORDER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+const TRANSFER = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const ENTRY = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+const RESERVATION = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+const MARKET = '0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a'
+
+test('a bot created says whether it can spend real money, which is the only news on the event', () => {
+  const created = (mode: string) =>
+    classify(
+      delivery({
+        topic: 'trade.bot.created',
+        key: BOT,
+        // `insertBot` — trade/src/bots.ts.
+        payload: { botId: BOT, mode, strategyId: 'ema_cross', allocation: '250000' },
+        actor: `user:${ALICE}`,
+      }).envelope,
+      true,
+    )
+
+  const live = created('live')
+  assert.equal(live.category, 'trading')
+  assert.equal(live.type, 'trading.bot_created')
+  assert.equal(live.userId, ALICE)
+  assert.equal(live.visibility, 'user')
+  assert.equal(live.subjectUrn, `urn:cloudsforge:trade:bot:${BOT}`)
+  assert.match(live.summary, /^A live trading bot running ema_cross was created\./)
+  // The sentence a live bot's owner has to be given: nothing is reserved YET. Delete the `mode`
+  // branch and this reads as the paper copy, which tells a live customer their bot cannot move
+  // their balance.
+  assert.match(live.summary, /Starting it will reserve its allocation/)
+
+  const paper = created('paper')
+  assert.match(paper.summary, /^A paper trading bot running ema_cross was created\./)
+  assert.match(paper.summary, /cannot move your balance/)
+  assert.notEqual(paper.summary, live.summary)
+
+  // ── The allocation is a SHARD count and never becomes a figure anywhere ──────────────────
+  // 250000 Shards is $2,500. Rendered as a decimal it is "250,000", which is the exact class of
+  // defect `money`'s header describes. It reaches neither the column nor the prose, and it is not
+  // stored either: an undeclared key is dropped and named in `__redacted`.
+  assert.equal(live.amount, null)
+  assert.equal(live.assetCode, null)
+  assert.ok(!live.summary.includes('250000'))
+  assert.deepEqual(Object.keys(live.payload).sort(), ['__redacted', 'mode', 'strategyId'])
+  assert.deepEqual(live.payload['__redacted'], ['allocation', 'botId'])
+})
+
+test('a bot started distinguishes the start that reserved capital from the one that did not', () => {
+  const started = (reservationId: string | null) =>
+    classify(
+      delivery({
+        topic: 'trade.bot.started',
+        key: BOT,
+        // `startBot` — trade/src/bots.ts. `reservationId` is null unless the bot is live.
+        payload: { botId: BOT, mode: reservationId === null ? 'paper' : 'live', reservationId },
+        actor: `user:${ALICE}`,
+      }).envelope,
+      true,
+    )
+
+  const live = started(RESERVATION)
+  assert.equal(live.category, 'trading')
+  assert.equal(live.type, 'trading.bot_started')
+  assert.equal(live.userId, ALICE)
+  assert.equal(live.visibility, 'user')
+  // The half a balance cannot show: a reservation moves nothing between accounts, so the number
+  // on screen is unchanged and smaller than it looks.
+  assert.match(live.summary, /cannot be spent elsewhere until the bot stops/)
+
+  const paper = started(null)
+  assert.equal(paper.type, 'trading.bot_started_paper')
+  assert.match(paper.summary, /cannot move your balance/)
+  // The discriminator is the RESERVATION and not the mode, so these two must not share a type.
+  // Collapse `type` to a constant and this line goes red.
+  assert.notEqual(paper.type, live.type)
+})
+
+test('a settled fill is nobody\'s until trade names its owner, and says whether it was real', () => {
+  const settled = (payload: Record<string, unknown>) =>
+    // No actor: `applyFill` passes none, so trade/src/outbox.ts stamps `service:trade`.
+    classify(delivery({ topic: 'trade.fill.settled', key: FILL, payload }).envelope, true)
+
+  // What `applyFill` really sends, for a LIVE fill: an `entryId` from the ledger, no user.
+  const real = settled({ fillId: FILL, botId: BOT, side: 'buy', qty: '3', shards: '-45000', entryId: ENTRY })
+  assert.equal(real.category, 'trading')
+  assert.equal(real.type, 'trading.fill_settled')
+  assert.match(real.summary, /bought and the fill settled against your balance/)
+  // Nobody's, and INTERNAL rather than a user-visible row no user can see. That demotion is
+  // `classify`'s, not the classifier's — the classifier says `visibility: 'user'`.
+  assert.equal(real.userId, null)
+  assert.equal(real.visibility, 'internal')
+  assert.equal(real.subjectUrn, `urn:cloudsforge:trade:fill:${FILL}`)
+
+  // A PAPER fill: `runBot`'s paper branch calls `applyFill` with `entryId: null`, because posting
+  // it "would put a simulation in the journal". Two facts, and the entry is the only thing on the
+  // payload that separates them. Drop the `entryId` branch and this reads as real money.
+  const simulated = settled({ fillId: FILL, botId: BOT, side: 'sell', qty: '3', shards: '45000', entryId: null })
+  assert.match(simulated.summary, /paper trading bot sold\. No real money moved\./)
+  assert.notEqual(simulated.summary, real.summary)
+
+  // `shards` is a Shard count. It is not `amount`, so it never reaches the column; it is not
+  // declared, so it is not stored either.
+  assert.equal(real.amount, null)
+  // `userId` is declared and the producer does not send it, so it is simply absent — an allowlist
+  // names what MAY be stored, not what must be.
+  assert.deepEqual(Object.keys(real.payload).sort(), ['__redacted', 'entryId', 'side'])
+  assert.deepEqual(real.payload['__redacted'], ['botId', 'fillId', 'qty', 'shards'])
+  // `userId` is declared and read against a payload that does not carry it, which is what makes
+  // the dead branch live: the day trade adds the field the fill reaches its owner with no edit in
+  // classify.ts. Switch the reader to a hard `null` and this goes red.
+  const attributed = settled({ fillId: FILL, botId: BOT, userId: ALICE, side: 'buy', qty: '3', shards: '-1', entryId: ENTRY })
+  assert.equal(attributed.userId, ALICE)
+  assert.equal(attributed.visibility, 'user')
+})
+
+test('a performance fee is the platform charging the customer, and says so in those words', () => {
+  const charged = classify(
+    delivery({
+      topic: 'trade.fee.settled',
+      key: SETTLEMENT,
+      // `settleFee` — trade/src/fees.ts, emitted only when `collected > 0n`.
+      payload: { settlementId: SETTLEMENT, botId: BOT, period: '4', collected: '1250', entryId: ENTRY },
+      actor: `user:${ALICE}`,
+    }).envelope,
+    true,
+  )
+  assert.equal(charged.category, 'trading')
+  assert.equal(charged.type, 'trading.fee_settled')
+  assert.equal(charged.userId, ALICE)
+  assert.equal(charged.visibility, 'user')
+  assert.equal(charged.subjectUrn, `urn:cloudsforge:trade:fee:${SETTLEMENT}`)
+  assert.match(charged.summary, /A performance fee was charged/)
+  // The period is the handle a support conversation uses. Drop it and the sentence describes a
+  // charge the customer cannot locate among several.
+  assert.match(charged.summary, /for period 4/)
+  // And the rule that makes the entry defensible: the fee is taken from the gain above the mark,
+  // not from the allocation. An owner who reads only "a fee was charged" asks why.
+  assert.match(charged.summary, /high-water mark/)
+
+  // 1250 Shards is $12.50. It is not shown, because a Shard count rendered by hub-web's decimal
+  // formatter is "1,250" beside no asset code at all.
+  assert.equal(charged.amount, null)
+  assert.ok(!charged.summary.includes('1250'))
+  assert.deepEqual(Object.keys(charged.payload).sort(), ['__redacted', 'period'])
+  assert.deepEqual(charged.payload['__redacted'], ['botId', 'collected', 'entryId', 'settlementId'])
+
+  // The key is the SETTLEMENT, a uuid that is not a person, and the actor is the owner off the
+  // bot row. A key reader would file every fee against a settlement dressed up as a customer.
+  assert.notEqual(charged.userId, SETTLEMENT)
+})
+
+test('a filled exchange order does not render a buy as a sale', () => {
+  const filled = (side: string) =>
+    classify(
+      delivery({
+        topic: 'trade.order.filled',
+        key: ORDER,
+        // `matchOrder` — trade/src/exchange.ts. No actor; the TAKER is on the payload.
+        payload: {
+          orderId: ORDER,
+          marketId: MARKET,
+          symbol: 'EMBER/USD',
+          userId: BOB,
+          side,
+          filledQty: '4000000000000000000',
+          filledQuoteQty: '900',
+          tradeCount: 2,
+        },
+      }).envelope,
+      true,
+    )
+
+  const bought = filled('buy')
+  assert.equal(bought.category, 'trading')
+  assert.equal(bought.type, 'trading.order_bought')
+  // The payload's user, not the envelope's actor — which is `service:trade` here, so an
+  // actor-reading classifier would file this in nobody's feed at all.
+  assert.equal(bought.userId, BOB)
+  assert.equal(bought.visibility, 'user')
+  assert.equal(bought.summary, 'Your buy order on EMBER/USD filled.')
+  assert.equal(bought.subjectUrn, `urn:cloudsforge:trade:order:${ORDER}`)
+
+  const sold = filled('sell')
+  assert.equal(sold.type, 'trading.order_sold')
+  assert.equal(sold.summary, 'Your sell order on EMBER/USD filled.')
+  // Collapse either `type` or `summary` to one string and one of these two goes red. A feed that
+  // renders a sale as a purchase is a feed people stop believing.
+  assert.notEqual(sold.type, bought.type)
+  assert.notEqual(sold.summary, bought.summary)
+
+  // `filledQty` is 4 EMBER in wei. Eighteen orders of magnitude, and it reaches neither the column
+  // nor the prose nor the stored payload.
+  assert.equal(bought.amount, null)
+  assert.ok(!bought.summary.includes('4000000000000000000'))
+  assert.deepEqual(Object.keys(bought.payload).sort(), ['__redacted', 'side', 'symbol', 'userId'])
+  assert.deepEqual(bought.payload['__redacted'], [
+    'filledQty',
+    'filledQuoteQty',
+    'marketId',
+    'orderId',
+    'tradeCount',
+  ])
+})
+
+test('an exchange transfer names its asset and its direction, and files under transfer', () => {
+  const settled = (direction: string) =>
+    classify(
+      delivery({
+        topic: 'trade.transfer.settled',
+        key: TRANSFER,
+        // `settleTransfer` — trade/src/transfers.ts. `asset`, not `assetCode`.
+        payload: {
+          transferId: TRANSFER,
+          userId: ALICE,
+          asset: 'EMBER',
+          direction,
+          amount: '4000000000000000000',
+          entryId: ENTRY,
+        },
+      }).envelope,
+      true,
+    )
+
+  const deposit = settled('deposit')
+  // `transfer`, not `trading`: somebody asking where their EMBER went filters on movements. Both
+  // classes are `financial` in retention.ts, so this is a filter decision and not a retention one.
+  assert.equal(deposit.category, 'transfer')
+  assert.equal(deposit.type, 'transfer.exchange_deposit')
+  assert.equal(deposit.userId, ALICE)
+  assert.equal(deposit.visibility, 'user')
+  assert.equal(deposit.summary, 'Your EMBER deposit into the exchange settled and is available to trade.')
+  assert.equal(deposit.subjectUrn, `urn:cloudsforge:trade:transfer:${TRANSFER}`)
+
+  const withdrawal = settled('withdrawal')
+  assert.equal(withdrawal.type, 'transfer.exchange_withdrawal')
+  assert.match(withdrawal.summary, /back in your wallet balance/)
+  assert.notEqual(withdrawal.type, deposit.type)
+  assert.notEqual(withdrawal.summary, deposit.summary)
+
+  // ── THE FIGURE IS 4 EMBER AND THE COLUMN STAYS NULL ─────────────────────────────────────
+  // This is the assertion that goes red if `trade` is removed from SMALLEST_UNIT_PRODUCERS: the
+  // payload spells the field `amount`, so `money` would pass 4000000000000000000 straight into
+  // the column, and hub-web renders that column with a thousands separator beside `assetCode`.
+  assert.equal(deposit.amount, null)
+  // And `asset` is not `assetCode`, so the COLUMN is empty while the summary still names EMBER.
+  // Stated rather than fixed here: inventing a second spelling for a column every other producer
+  // gets right would hide a producer defect instead of leaving it visible.
+  assert.equal(deposit.assetCode, null)
+  assert.deepEqual(Object.keys(deposit.payload).sort(), ['__redacted', 'asset', 'direction', 'userId'])
+  assert.deepEqual(deposit.payload['__redacted'], ['amount', 'entryId', 'transferId'])
+})
+
+/**
+ * **THE DEFECT micro-org#345 CALLS THE REAL ONE, and the missing feed rows the symptom.**
+ *
+ * `collectEnvelopeDefects` can only check that a producer OWNS a topic when there is a `TopicSpec`
+ * to check against; for an unregistered topic it records the topic and leaves the spec undefined,
+ * so the ownership branch never runs. Until these six were registered, an envelope claiming to be
+ * trade's was shelved as an ordinary stranger. Measured on main on 2026-08-10:
+ *
+ *     classifyEnvelope({ topic: 'trade.fee.settled', producer: 'wallet', … })
+ *       → { reason: 'unregistered_topic', defects: [] }        ← stored as unclassified
+ *     classifyEnvelope({ topic: 'trade.bot.paused', producer: 'wallet', … })
+ *       → { reason: 'malformed', defects: ['producer: "wallet" does not own topic …'] }
+ *
+ * One forgery refused and six identical ones accepted, with nothing but the registry between them.
+ * This test goes red on the six the moment any of them leaves `TOPICS` — which is exactly what the
+ * estate looked like the day before this change, and is the whole of its mutation proof.
+ *
+ * `trade.bot.paused` is included as the CONTROL. It was already registered, so it already failed
+ * this way; if the loop ever passes for it alone, the check has stopped measuring registration.
+ */
+test('THE RULE: a forged producer on a trade topic is refused, not quarantined', () => {
+  const forgeries: readonly TopicName[] = [
+    'trade.bot.created',
+    'trade.bot.started',
+    'trade.bot.paused',
+    'trade.fill.settled',
+    'trade.fee.settled',
+    'trade.order.filled',
+    'trade.transfer.settled',
+  ]
+  for (const topic of forgeries) {
+    // Hand-built, because `makeEvent` reads the producer off the registry and will not let a test
+    // express the envelope a compromised or misconfigured service would actually send.
+    const { body } = unknownTopicDelivery(topic, { userId: ALICE }, { producer: 'wallet' })
+    assert.throws(
+      () => parseDelivery(body),
+      (err: unknown) => {
+        assert.ok(err instanceof MalformedEventError, `${topic}: a forged producer was accepted`)
+        assert.ok(
+          err.errors.some((each) => /producer/.test(each)),
+          `${topic}: refused, but not for the producer: ${err.errors.join('; ')}`,
+        )
+        return true
+      },
+      `${topic} claiming to come from wallet was not refused`,
+    )
+  }
+
+  // The other half of the property, so this cannot pass by refusing everything: an envelope whose
+  // producer IS trade goes through on all seven.
+  for (const topic of forgeries) {
+    const { body } = unknownTopicDelivery(topic, { userId: ALICE }, { producer: 'trade' })
+    assert.doesNotThrow(() => parseDelivery(body), `${topic} from its own producer was refused`)
+  }
+})
+
+/**
+ * The four money topics, held to `redact.ts` as a family rather than one entry at a time.
+ *
+ * The individual tests above pin each classifier's own key set. This one asks the question that
+ * survives somebody adding a seventh trade topic: does any of the four store a key it does not
+ * read — and in particular, does any of them store a FIGURE. A Shard count or a wei quantity left
+ * in `activity_records.payload` is not itself a leak, but the four columns beside it are what a
+ * frontend renders, and every one of these amounts has been kept out of them deliberately.
+ *
+ * Add `collected`, `shards`, `amount` or `filledQty` to any of the four `payloadKeys` and this
+ * goes red naming the topic and the key.
+ */
+test('THE RULE: none of trade\'s four money topics stores a figure it declined to render', () => {
+  const cases: readonly (readonly [TopicName, string, Record<string, unknown>, readonly string[]])[] = [
+    [
+      'trade.fill.settled',
+      FILL,
+      { fillId: FILL, botId: BOT, side: 'buy', qty: '3', shards: '-45000', entryId: ENTRY },
+      ['qty', 'shards'],
+    ],
+    [
+      'trade.fee.settled',
+      SETTLEMENT,
+      { settlementId: SETTLEMENT, botId: BOT, period: '4', collected: '1250', entryId: ENTRY },
+      ['collected'],
+    ],
+    [
+      'trade.order.filled',
+      ORDER,
+      {
+        orderId: ORDER,
+        marketId: MARKET,
+        symbol: 'EMBER/USD',
+        userId: ALICE,
+        side: 'buy',
+        filledQty: '4000000000000000000',
+        filledQuoteQty: '900',
+        tradeCount: 2,
+      },
+      ['filledQty', 'filledQuoteQty'],
+    ],
+    [
+      'trade.transfer.settled',
+      TRANSFER,
+      {
+        transferId: TRANSFER,
+        userId: ALICE,
+        asset: 'EMBER',
+        direction: 'deposit',
+        amount: '4000000000000000000',
+        entryId: ENTRY,
+      },
+      ['amount'],
+    ],
+  ]
+
+  for (const [topic, key, payload, figures] of cases) {
+    const classified = classify(delivery({ topic, key, payload, actor: `user:${ALICE}` }).envelope, true)
+    for (const field of figures) {
+      assert.ok(
+        !(field in classified.payload),
+        `${topic} stored payload.${field}, a figure it declined to put in the amount column`,
+      )
+      assert.ok(
+        classified.redactedKeys.includes(field),
+        `${topic} dropped payload.${field} without naming it in __redacted, so nobody can see it went`,
+      )
+      assert.ok(
+        !classified.summary.includes(String(payload[field])),
+        `${topic} printed ${field} in its summary`,
+      )
+    }
+    // And the column itself. Every one of these payloads carries an integer count of smallest
+    // units; not one of them may reach a decimal formatter.
+    assert.equal(classified.amount, null, `${topic} put a smallest-units figure in the amount column`)
+  }
 })
 
 test('an API key issued lands in the feed of the person it can act as', () => {
