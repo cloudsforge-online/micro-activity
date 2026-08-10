@@ -174,6 +174,14 @@ function asset(envelope: EventEnvelope, field = 'assetCode'): string | null {
  *   - `market`      — `orders.amount` and `bids.amount` are `numeric(78,0)` too
  *                     (`market/src/migrations.ts,402`), and `orderEventPayload` emits
  *                     `order.amount.toString()` (`market/src/orders.ts`).
+ *   - `trade`       — joined with micro-org#345, and the best-evidenced of the five. Every money
+ *                     column in `trade/src/migrations.ts` is `numeric(78,0)` — allocation, cash,
+ *                     equity, high_water_mark, fee_owed, fee_paid, shards, collected — and
+ *                     `trade/src/money.ts` is `bigint` throughout with a header that exists
+ *                     because the service it replaces read every one of those columns into a
+ *                     JavaScript `number`. Its three units are named there and all three are
+ *                     integers: Shards (no sub-unit at all, 100 to the USD), base units, and a
+ *                     price scaled by `RATE_SCALE`. There is no decimal on any trade payload.
  *
  * Adding a producer here is a one-line change and removing one needs the same kind of citation.
  * ═════════════════════════════════════════════════════════════════════════════════════════════ */
@@ -182,6 +190,7 @@ const SMALLEST_UNIT_PRODUCERS: ReadonlySet<ProducerService> = new Set<ProducerSe
   'settlement',
   'ledger',
   'market',
+  'trade',
 ])
 
 /**
@@ -391,10 +400,21 @@ function userFromPayload(envelope: EventEnvelope): string | null {
  * why `notify` refuses the generic helper there and reads `sellerSubject` explicitly. Reaching for
  * this reader because a payload is thin is how "your city was raided" lands in the raider's feed.
  *
- * It is used by exactly three topics — `trade.bot.paused`, `devplatform.key.issued` and
- * `devplatform.key.revoked` — and each one cites the line of its producer that proves the actor is
- * the subject of the news rather than merely its cause. Nothing else may use it without doing the
- * same.
+ * It is used by exactly six topics — `trade.bot.created`, `trade.bot.started`, `trade.bot.paused`,
+ * `trade.fee.settled`, `devplatform.key.issued` and `devplatform.key.revoked` — and each one cites
+ * the site in its producer that proves the actor is the subject of the news rather than merely its
+ * cause. Nothing else may use it without doing the same, and `unit.test.ts`'s actor rule holds every
+ * other topic in the registry to that refusal.
+ *
+ * **trade's four are the easy case and it is worth saying why, so the next author does not read
+ * them as a precedent for the hard one.** All four take their actor from the BOT ROW rather than
+ * from the caller — `bots.ts` and `fees.ts` build it from `bot.userId`, not from the session — so
+ * the actor is the owner whoever pressed the button and whatever route reached the emit. That is a
+ * different and much stronger claim than "the person who acted is usually the person affected",
+ * which is the claim that fails on `aetherholm.battle.resolved`. trade's other three topics do NOT
+ * qualify: `trade.fill.settled` is emitted with no actor at all (`service:trade`), and
+ * `trade.order.filled` and `trade.transfer.settled` name their user on the payload, where a reader
+ * needs no argument at all.
  *
  * `parseActor` from contracts-events rather than a `startsWith('user:')`, because the actor
  * vocabulary is the contract's and this file must not hold a second opinion about it. That is not
@@ -1714,7 +1734,13 @@ export const CLASSIFIERS = Object.freeze({
       return choice ? `Your vote (${choice}) was recorded${delegated}.` : `Your vote was recorded${delegated}.`
     },
   },
-  /* ── trade's one and devplatform's two: three topics whose PAYLOADS NAME NOBODY ─────────────
+  /* ── the topics whose PAYLOADS NAME NOBODY: trade's four and devplatform's two ──────────────
+   *
+   * Three of these arrived together by micro-contracts `8889373`. Three more joined them with
+   * micro-org#345 — `trade.bot.created`, `trade.bot.started` and `trade.fee.settled`, all three
+   * emitted with an actor of `user:` plus the bot's own `userId` column, read off the bot row, and
+   * a payload that names the BOT and not its owner. The block below carries the rest of #345's
+   * argument; this header is the part the six share.
    *
    * Registered together by micro-contracts `8889373`, and the three that made this file fail to
    * compile. That compile error was the cheap half of the fault. The expensive half is that
@@ -1746,7 +1772,78 @@ export const CLASSIFIERS = Object.freeze({
    * same payloads for its two API-key rules, independently and first.
    * ------------------------------------------------------------------------------------------ */
   /**
-   * The first record in the `trading` category — a filter that has existed with nothing behind it.
+   * A bot exists. **No money has moved and the summary must not imply that it has.**
+   *
+   * `insertBot` writes the row and mirrors the allocation the user typed into the bot's own `cash`
+   * and `equity`; the ledger is not called until the bot is STARTED, and even then only for a live
+   * one. So this is the record of an intention, and the entry below it is the record of the money.
+   *
+   * **`mode` is the whole of the news.** `BotMode = 'paper' | 'live'` (`trade/src/bots.ts`), and a
+   * paper bot never touches the journal at all — `runBot`'s paper branch says so at the fill
+   * ("posting it would put a simulation in the journal"). "You created a trading bot" without that
+   * word is the one sentence here that a reader could act wrongly on, in either direction: believing
+   * a simulation is spending their balance, or believing a live bot is not.
+   *
+   * **`allocation` is read by nothing and therefore declared by nothing.** It is a Shard count, and
+   * Shards are an integer currency with no sub-unit (`trade/src/money.ts`), so `money` declines it
+   * for the reason every smallest-units producer's figure is declined — and it is SHARD-denominated,
+   * which `RETIRED_ASSETS` would refuse to name to a user anyway (micro-org #227). The producer's
+   * own figure survives verbatim in `activity_records.payload`… except that it does not, because an
+   * undeclared key is dropped: it appears in `__redacted` instead. That is the allowlist working as
+   * designed and it is stated here so the next reader does not think it an oversight.
+   */
+  'trade.bot.created': {
+    payloadKeys: ['mode', 'strategyId'],
+    category: 'trading',
+    type: 'trading.bot_created',
+    visibility: 'user',
+    // The actor is the OWNER off the bot row, not whoever called the route — same as the pause
+    // below. NOT userFromKey: the key is `bot.id` (registry `keyedBy: 'bot_id'`), a uuid.
+    userId: userFromActor,
+    summary: (event) => {
+      const strategy = text(event, 'strategyId', 32)
+      const named = strategy ? ` running ${strategy}` : ''
+      return text(event, 'mode', 8) === 'paper'
+        ? `A paper trading bot${named} was created. It trades simulated money and cannot move your balance.`
+        : `A live trading bot${named} was created. Starting it will reserve its allocation from your balance.`
+    },
+  },
+  /**
+   * **THE MOMENT THE PLATFORM TAKES A CUSTOMER'S CAPITAL AND HOLDS IT** — for a live bot.
+   *
+   * `startBot` calls the ledger's `reserve` as `service:trade` BEFORE the status changes, and the
+   * schema refuses a running live bot without a reservation (`bots_live_capital_reserved`). That
+   * reservation is the fact this entry exists for, and it is why `contracts`' audit table decides
+   * yes here and no on the creation above.
+   *
+   * **Two facts, and `reservationId` is the discriminator that already exists on the payload.** A
+   * paper start reserves nothing — `startBot` only enters the reserve branch for `mode === 'live'`
+   * — so the field is null on exactly the events where no money moved. Reading `reservationId`
+   * rather than `mode` is deliberate: `mode` says what the bot IS, and this branch needs to say
+   * what this START DID. A live bot restarted after a pause already holds its reservation and takes
+   * the same branch, correctly, because the capital is still held.
+   *
+   * The summary says the allocation is not spendable elsewhere, which is the part a reader cannot
+   * see anywhere else: a reservation moves nothing between accounts, so a balance that looks
+   * unchanged is nonetheless smaller than it was.
+   */
+  'trade.bot.started': {
+    payloadKeys: ['reservationId'],
+    category: 'trading',
+    type: (event) =>
+      typeof payloadOf(event)['reservationId'] === 'string'
+        ? 'trading.bot_started'
+        : 'trading.bot_started_paper',
+    visibility: 'user',
+    userId: userFromActor,
+    summary: (event) =>
+      typeof payloadOf(event)['reservationId'] === 'string'
+        ? 'Your trading bot started. Its allocation is now reserved: the balance is still yours, but it cannot be spent elsewhere until the bot stops.'
+        : 'Your paper trading bot started. It trades simulated money and cannot move your balance.',
+  },
+  /**
+   * The first record written into the `trading` category, and for a long time the only one — the
+   * two entries above it and the four below arrived with micro-org#345.
    *
    * **One fact, not two.** A pause is a pause: `pauseBot` (`trade/src/bots.ts`) has one
    * caller (`trade/src/server.ts`), one guard (`bot.status !== 'running'`) and one payload, and
@@ -1778,6 +1875,184 @@ export const CLASSIFIERS = Object.freeze({
     userId: userFromActor,
     summary: () =>
       'Your trading bot stopped. Pausing does not close its position — that stays open until you resume or stop the bot.',
+  },
+  /* ── trade's FOUR MONEY TOPICS. micro-org#345 ───────────────────────────────────────────────
+   *
+   * Every one of these four corresponds to a ledger entry, and all four spent the life of the
+   * service in `unclassified` — which cost more than the missing feed rows. `unclassified` maps to
+   * the `quarantine` retention class, 90 days, while a `trading` or `transfer` record is
+   * `financial` at 1825. Four topics' worth of money movement was being deleted at three months
+   * because nobody had written a classifier, and the pruner was doing exactly what it was told.
+   *
+   * **`trade` joins `SMALLEST_UNIT_PRODUCERS` in the same change, and that is load-bearing.** Every
+   * figure on these four payloads is an integer count: `trade/src/money.ts` is `bigint` throughout
+   * with a header that names the float-money defect it exists to close, and every money column in
+   * `trade/src/migrations.ts` is `numeric(78,0)`. Without that line, `money` would put a raw Shard
+   * count in the `amount` column and `hub-web`'s decimal formatter would render it with thousands
+   * separators as if it were a decimal figure. See `money`'s own header — the column is prose with
+   * extra steps.
+   *
+   * The consequence is that NONE of the four prints a figure today, and the summaries are written
+   * to be worth reading without one. Each of them carries what the reader cannot get elsewhere: an
+   * asset code, a direction, a market, or the fact that the platform charged them.
+   * ------------------------------------------------------------------------------------------ */
+  /**
+   * **NOT EMITTED IN PRODUCTION TODAY, and that is a producer defect rather than a reason to skip
+   * the classifier.** Both `applyFill` and `settleFill` take an optional `emit`, and neither of
+   * `runBot`'s two call sites — the paper branch and the live one — passes one, so no
+   * `trade.fill.settled` has ever reached this service. Verified on `micro-trade` main on
+   * 2026-08-10. A classifier for a topic no producer sends is the same defect as a producer no
+   * classifier covers, and only the second has a compile error to announce it; this one is written
+   * now so that the day the emit is wired up the fills land classified rather than quarantined.
+   *
+   * **The payload names nobody, and `userFromActor` is the WRONG repair here.** The emit passes no
+   * actor at all, so `trade/src/outbox.ts` falls back to `service:trade` — there is no user on the
+   * envelope to read, and `userFromActor` would return null just as `userFromPayload` does. The
+   * owner exists and trade is holding it: `FillRecord.userId` is on the row `applyFill` returns and
+   * `settleFill` already passes it to `fillPostings`. Until it is on the payload every fill is an
+   * `internal` record — correct, because a classifier may not query a database to find an owner,
+   * and a `user`-visible record nobody can see reads on a dashboard as a delivered notification.
+   * Filed for micro-trade with the emit above.
+   *
+   * `userFromPayload` rather than a hard null, so the day trade adds the field the fills reach
+   * their owner's feed with no edit here. Same shape as the dead asset-code branch in
+   * `seasonRewardSummary`.
+   */
+  'trade.fill.settled': {
+    payloadKeys: ['userId', 'side', 'entryId'],
+    category: 'trading',
+    type: 'trading.fill_settled',
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: (event) => {
+      const side = text(event, 'side', 8)
+      const traded = side === 'buy' ? 'bought' : side === 'sell' ? 'sold' : 'traded'
+      // `entryId` is null for a paper fill and a journal id for a live one — `runBot`'s paper
+      // branch makes no ledger call, because "posting it would put a simulation in the journal".
+      // So the presence of the entry is the only thing on this payload that separates imaginary
+      // money from real money, and a summary that did not say so would describe both identically.
+      return typeof payloadOf(event)['entryId'] === 'string'
+        ? `Your trading bot ${traded} and the fill settled against your balance.`
+        : `Your paper trading bot ${traded}. No real money moved.`
+    },
+  },
+  /**
+   * **THE PLATFORM CHARGING THE CUSTOMER**, which is the one entry in this block whose absence a
+   * user would have noticed. A performance fee leaves an account on the estate's own initiative
+   * rather than the customer's, and "why was I billed this" is answerable from the settlement, the
+   * period and the journal entry, or it is not answerable at all. `contracts`' audit table decides
+   * yes here for the same sentence.
+   *
+   * **The figure cannot be shown and the summary does not pretend otherwise.** `collected` is a
+   * Shard count — smallest units, so `money` declines it — and it is not spelled `amount`, so it
+   * never reaches the `amount` column either. The fee is only charged when something was actually
+   * collected: `settleFee` emits inside `if (collected > 0n)`, so there is no zero-fee event to
+   * disambiguate and the summary can state the charge flatly.
+   *
+   * **A partial collection is a different fact and is not distinguishable here.** `status` is
+   * `charged`, `partial` or `uncollectable` on trade's own row, and the payload carries none of the
+   * three — `{ settlementId, botId, period, collected, entryId }`. A user whose balance could not
+   * cover the fee has an outstanding `feeOwed` and this entry does not say so. Filed for
+   * micro-trade alongside the fill emit; not papered over with a hedge in the copy, because a
+   * sentence that says "some or all of a fee" is worse than one that says a fee was charged.
+   */
+  'trade.fee.settled': {
+    payloadKeys: ['period'],
+    category: 'trading',
+    type: 'trading.fee_settled',
+    visibility: 'user',
+    // The actor is the bot's OWNER off the row (`settleFee`), exactly as the pause and the two
+    // bot-lifecycle entries above. NOT userFromKey: the key is the SETTLEMENT id (registry
+    // `keyedBy: 'settlement_id'`), a uuid that is not a person.
+    userId: userFromActor,
+    summary: (event) => {
+      // The period counter, not a date: trade numbers a bot's settlement periods from its start.
+      // It is the handle a support conversation needs — "the fee for period 4" — and it is the
+      // only field on this payload that is neither an opaque id nor a figure that cannot be shown.
+      const period = amount(event, 'period')
+      const which = period === null ? '' : ` for period ${period}`
+      return `A performance fee was charged on your trading bot${which}. It is taken from the gain above the bot's previous high-water mark.`
+    },
+  },
+  /**
+   * The exchange's own order book, and the only topic in this block that names its user outright.
+   *
+   * **`userFromPayload`, not the actor.** `matchOrder` emits with no actor, so the envelope says
+   * `service:trade` — but the payload carries `userId`, and it is the TAKER's: the order that
+   * crossed. The maker on the other side of every fill gets no record from this event and cannot,
+   * because a classifier returns one record and may not read a database to find the counterparty.
+   * The same limit as `market.listing.sold` and `tessera.parcel.transferred`, and stated here for
+   * the same reason: a reader looking for the maker's row should find out why it is absent from
+   * this file rather than from an empty query.
+   *
+   * **Two facts, and the side is the discriminator.** Buying and selling are not one entry with a
+   * different noun in it — a frontend chooses an icon and a colour from `type`, and a feed that
+   * rendered a sale as a purchase is a feed people stop believing. Same argument as
+   * `identity.session.revoked`'s.
+   *
+   * **`filledQty` and `filledQuoteQty` are base units and are not read.** They are the asset's
+   * indivisible units, so their scale depends on `chainSpec(asset).decimals`, which this service
+   * cannot call; `money` would decline them even if they were spelled `amount`. The symbol and the
+   * side are what the reader can act on, and the terminal shows the figures live.
+   *
+   * **Behind `TRADE_EXCHANGE_ENABLED` today.** Classified anyway, and for the reason the registry
+   * entry gives: the day the flag goes on is the worst day to discover this file has no opinion.
+   */
+  'trade.order.filled': {
+    payloadKeys: ['userId', 'symbol', 'side'],
+    category: 'trading',
+    type: (event) => (text(event, 'side', 8) === 'sell' ? 'trading.order_sold' : 'trading.order_bought'),
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: (event) => {
+      // `symbol` is a market name (`EMBER/USD`) written by trade's own market table, not by a
+      // user — but it is capped anyway, because a summary is rendered in a feed and "the producer
+      // validates it" is a claim about today's producer.
+      const symbol = text(event, 'symbol', 24)
+      const market = symbol ? ` on ${symbol}` : ''
+      return text(event, 'side', 8) === 'sell'
+        ? `Your sell order${market} filled.`
+        : `Your buy order${market} filled.`
+    },
+  },
+  /**
+   * Money crossing the boundary between a customer's wallet and their exchange balance.
+   *
+   * **`transfer`, not `trading`.** The sixteen categories are what a user's feed is FILTERED by,
+   * and somebody looking for "where did my EMBER go" filters on movements, not on trading
+   * activity. `ledger.entry.posted` is filed the same way for the same reason, and this is the
+   * event that says which side of the boundary the money went to.
+   *
+   * **Two facts, and `direction` is the discriminator the producer already sends.** A deposit into
+   * the exchange and a withdrawal back out of it are opposite movements; one static type would hand
+   * a frontend one arrow for both.
+   *
+   * **The asset is named and the figure is not, and that asymmetry is the point.** `amount` is base
+   * units of the asset — `settleTransfer` writes `transfer.amount.toString()` off a `numeric(78,0)`
+   * column — so `money` declines it now that `trade` is a smallest-units producer. The asset code
+   * is spelled `asset` here rather than `assetCode`, so it does not reach the record's `assetCode`
+   * COLUMN either (`classify` fills that from `assetCode` only, and this file does not invent a
+   * second spelling for a column every other producer gets right). It is read into the SUMMARY
+   * instead, where "your EMBER deposit settled" is a sentence and "a transfer settled" is not.
+   */
+  'trade.transfer.settled': {
+    payloadKeys: ['userId', 'asset', 'direction'],
+    category: 'transfer',
+    type: (event) =>
+      text(event, 'direction', 16) === 'withdrawal'
+        ? 'transfer.exchange_withdrawal'
+        : 'transfer.exchange_deposit',
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: (event) => {
+      // `asset`, not `assetCode` — see the note above. The reader is the same one the column uses,
+      // so a code that would not be accepted there is not printed here either.
+      const code = asset(event, 'asset')
+      const named = code ? `${code} ` : ''
+      return text(event, 'direction', 16) === 'withdrawal'
+        ? `Your ${named}withdrawal from the exchange settled and is back in your wallet balance.`
+        : `Your ${named}deposit into the exchange settled and is available to trade.`
+    },
   },
   /**
    * The first record in the `api` category, and the same empty-filter story as `trading`.
