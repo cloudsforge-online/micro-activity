@@ -387,8 +387,13 @@ const ACTOR_ATTRIBUTED: readonly TopicName[] = [
   // `trade/src/bots.ts`, `settleFee` in `trade/src/fees.ts` — so the actor is the owner however the
   // emit was reached and whoever pressed the button. That is a property of the producer, not an
   // observation about who usually acts, which is the distinction `aetherholm.battle.resolved` makes
-  // expensive. trade's other three are absent on purpose: `trade.fill.settled` passes no actor at
-  // all and the other two name their user on the payload.
+  // expensive. trade's other three are absent on purpose, and `trade.fill.settled` is absent for a
+  // different reason than it used to be: it passed no actor at all until micro-trade `ee5e189` and
+  // now passes `user:${fill.userId}` off the fill row, exactly the shape the four above have — but
+  // the same commit put `userId` on its PAYLOAD, so it needs no argument from the actor and does
+  // not make one. `trade.order.filled` and `trade.transfer.settled` are the same case. Adding a
+  // topic here because its actor happens to be right is the mistake; the entry is for topics whose
+  // payload names nobody at all.
   'trade.bot.created',
   'trade.bot.started',
   'trade.bot.paused',
@@ -469,12 +474,19 @@ test('a paused bot reaches its owner — not the bot, and not whoever pressed th
   assert.equal(halted.visibility, 'internal')
 })
 
-/* ── trade's other six. micro-org#345 ─────────────────────────────────────────────────────────
+/* ── trade's other six. micro-org#345, and micro-org#367 ──────────────────────────────────────
  *
- * Every payload below was read off the emit site in `micro-trade` on 2026-08-10 and is spelled
- * here in full, including the fields these classifiers deliberately do not declare — a fixture
- * trimmed to what a classifier reads cannot show that the rest is dropped, which is half of what
- * these tests are for.
+ * Every payload below was read off the emit site in `micro-trade` and is spelled here in full,
+ * including the fields these classifiers deliberately do not declare — a fixture trimmed to what a
+ * classifier reads cannot show that the rest is dropped, which is half of what these tests are for.
+ *
+ * Re-read on 2026-08-12, against micro-trade `ee5e189` and `fix/transfer-asset-code`, and three of
+ * the six moved (micro-org#367). `trade.fill.settled` gained `userId` and an actor and is now
+ * emitted at all; `trade.fee.settled` gained `status` and `due`; `trade.transfer.settled` renamed
+ * `asset` to `assetCode`. The fields these fixtures carry but do not declare moved too — trade
+ * re-denominated from Shards to US cents in the same window, so the fill's figure is `usdCents`
+ * rather than `shards`. Spelling a fixture the way the producer no longer does is the failure mode
+ * these full payloads exist to avoid, so they are updated rather than left as they were.
  * ------------------------------------------------------------------------------------------ */
 
 const FILL = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
@@ -556,55 +568,105 @@ test('a bot started distinguishes the start that reserved capital from the one t
   assert.notEqual(paper.type, live.type)
 })
 
-test('a settled fill is nobody\'s until trade names its owner, and says whether it was real', () => {
-  const settled = (payload: Record<string, unknown>) =>
-    // No actor: `applyFill` passes none, so trade/src/outbox.ts stamps `service:trade`.
-    classify(delivery({ topic: 'trade.fill.settled', key: FILL, payload }).envelope, true)
+test('a settled fill reaches its owner, and says whether the money was real', () => {
+  const settled = (payload: Record<string, unknown>, actor: Actor = `user:${ALICE}`) =>
+    // `applyFill` now passes `user:${fill.userId}` off the row (micro-trade ee5e189). It passed
+    // no actor at all until then, so trade/src/outbox.ts stamped `service:trade`.
+    classify(delivery({ topic: 'trade.fill.settled', key: FILL, payload, actor }).envelope, true)
 
-  // What `applyFill` really sends, for a LIVE fill: an `entryId` from the ledger, no user.
-  const real = settled({ fillId: FILL, botId: BOT, side: 'buy', qty: '3', shards: '-45000', entryId: ENTRY })
+  // What `applyFill` really sends, for a LIVE fill: the owner, and an `entryId` from the ledger.
+  const real = settled({
+    fillId: FILL,
+    botId: BOT,
+    userId: ALICE,
+    side: 'buy',
+    qty: '3',
+    usdCents: '-45000',
+    entryId: ENTRY,
+  })
   assert.equal(real.category, 'trading')
   assert.equal(real.type, 'trading.fill_settled')
   assert.match(real.summary, /bought and the fill settled against your balance/)
-  // Nobody's, and INTERNAL rather than a user-visible row no user can see. That demotion is
-  // `classify`'s, not the classifier's — the classifier says `visibility: 'user'`.
-  assert.equal(real.userId, null)
-  assert.equal(real.visibility, 'internal')
+  // The half of micro-org#367 this file could not assert before: the fill lands in a feed. The
+  // classifier says `visibility: 'user'` and `classify` no longer demotes it, because there is
+  // now an owner on the payload to demote it for the absence of.
+  assert.equal(real.userId, ALICE)
+  assert.equal(real.visibility, 'user')
   assert.equal(real.subjectUrn, `urn:cloudsforge:trade:fill:${FILL}`)
 
-  // A PAPER fill: `runBot`'s paper branch calls `applyFill` with `entryId: null`, because posting
-  // it "would put a simulation in the journal". Two facts, and the entry is the only thing on the
-  // payload that separates them. Drop the `entryId` branch and this reads as real money.
-  const simulated = settled({ fillId: FILL, botId: BOT, side: 'sell', qty: '3', shards: '45000', entryId: null })
+  // A PAPER fill: `tickBot`'s paper branch calls `applyFill` with `entryId: null`, because posting
+  // it "would put a simulation in the journal" — and it emits, deliberately, citing this branch.
+  // Two facts, and the entry is the only thing on the payload that separates them. Drop the
+  // `entryId` branch and every simulated fill claims to have moved the reader's balance.
+  const simulated = settled({
+    fillId: FILL,
+    botId: BOT,
+    userId: ALICE,
+    side: 'sell',
+    qty: '3',
+    usdCents: '45000',
+    entryId: null,
+  })
   assert.match(simulated.summary, /paper trading bot sold\. No real money moved\./)
   assert.notEqual(simulated.summary, real.summary)
 
-  // `shards` is a Shard count. It is not `amount`, so it never reaches the column; it is not
+  // `usdCents` is a cent count. It is not `amount`, so it never reaches the column; it is not
   // declared, so it is not stored either.
   assert.equal(real.amount, null)
-  // `userId` is declared and the producer does not send it, so it is simply absent — an allowlist
-  // names what MAY be stored, not what must be.
-  assert.deepEqual(Object.keys(real.payload).sort(), ['__redacted', 'entryId', 'side'])
-  assert.deepEqual(real.payload['__redacted'], ['botId', 'fillId', 'qty', 'shards'])
-  // `userId` is declared and read against a payload that does not carry it, which is what makes
-  // the dead branch live: the day trade adds the field the fill reaches its owner with no edit in
-  // classify.ts. Switch the reader to a hard `null` and this goes red.
-  const attributed = settled({ fillId: FILL, botId: BOT, userId: ALICE, side: 'buy', qty: '3', shards: '-1', entryId: ENTRY })
-  assert.equal(attributed.userId, ALICE)
-  assert.equal(attributed.visibility, 'user')
+  assert.deepEqual(Object.keys(real.payload).sort(), ['__redacted', 'entryId', 'side', 'userId'])
+  assert.deepEqual(real.payload['__redacted'], ['botId', 'fillId', 'qty', 'usdCents'])
+
+  // ── The reader is the PAYLOAD and must stay the payload ─────────────────────────────────────
+  // trade builds the actor and the payload's `userId` from the same `fill.userId`, so today they
+  // agree and a test written against agreement proves nothing. Pinned against an envelope where
+  // they DISAGREE: switch this entry to `userFromActor` — which the actor rule above would then
+  // also have to be widened for — and the fill lands in the wrong person's feed here first.
+  const contested = settled(
+    { fillId: FILL, botId: BOT, userId: BOB, side: 'buy', qty: '3', usdCents: '-1', entryId: ENTRY },
+    `user:${ALICE}`,
+  )
+  assert.equal(contested.userId, BOB, 'the payload names the owner; the actor must not override it')
+
+  // And the demotion is still there behind it. A producer that stopped sending `userId` would be a
+  // regression rather than a shape to render: an unattributable row is internal, never a
+  // user-visible record no user can see.
+  const anonymous = settled({ fillId: FILL, botId: BOT, side: 'buy', qty: '3', usdCents: '-1', entryId: ENTRY })
+  assert.equal(anonymous.userId, null)
+  assert.equal(anonymous.visibility, 'internal')
 })
 
-test('a performance fee is the platform charging the customer, and says so in those words', () => {
-  const charged = classify(
-    delivery({
-      topic: 'trade.fee.settled',
-      key: SETTLEMENT,
-      // `settleFee` — trade/src/fees.ts, emitted only when `collected > 0n`.
-      payload: { settlementId: SETTLEMENT, botId: BOT, period: '4', collected: '1250', entryId: ENTRY },
-      actor: `user:${ALICE}`,
-    }).envelope,
-    true,
-  )
+/**
+ * Both halves of the fee, driven as a PAIR, because either one alone passes against a constant.
+ *
+ * A test that only asserted the partial sentence exists would stay green against a classifier that
+ * returned the partial sentence for everything, and the charged-only test that stood here for two
+ * days stayed green against exactly the code micro-org#367 was filed about — one message for three
+ * different outcomes. So the two events differ in ONE field, `status`, and the assertions are on
+ * the difference rather than on either string.
+ */
+test('a performance fee tells a full collection from a partial one, and says so in those words', () => {
+  // `settleFee` — trade/src/fees.ts, emitted only when `collected > 0n`. `status` and `due` joined
+  // the payload in micro-trade `ee5e189`; `collected < due` is what makes a settlement `partial`.
+  const settled = (status: string, collected: string) =>
+    classify(
+      delivery({
+        topic: 'trade.fee.settled',
+        key: SETTLEMENT,
+        payload: {
+          settlementId: SETTLEMENT,
+          botId: BOT,
+          period: '4',
+          collected,
+          due: '1250',
+          status,
+          entryId: ENTRY,
+        },
+        actor: `user:${ALICE}`,
+      }).envelope,
+      true,
+    )
+
+  const charged = settled('charged', '1250')
   assert.equal(charged.category, 'trading')
   assert.equal(charged.type, 'trading.fee_settled')
   assert.equal(charged.userId, ALICE)
@@ -618,16 +680,56 @@ test('a performance fee is the platform charging the customer, and says so in th
   // not from the allocation. An owner who reads only "a fee was charged" asks why.
   assert.match(charged.summary, /high-water mark/)
 
-  // 1250 Shards is $12.50. It is not shown, because a Shard count rendered by hub-web's decimal
-  // formatter is "1,250" beside no asset code at all.
+  // ── THE PARTIAL, WHICH IS A DIFFERENT PIECE OF NEWS AND NOT A SMALLER ONE ──────────────────
+  // The customer's balance did not cover the assessment; `settleFee` writes the shortfall back to
+  // `feeOwed` and the next period's `due` is `fee + feeOwed`, so the money is still owed and will
+  // be taken. Told "a performance fee was charged", this reader believes the matter closed and
+  // then sees a settlement that takes two periods' fees with nothing explaining it.
+  const partial = settled('partial', '60')
+  assert.equal(partial.type, 'trading.fee_settled_partial')
+  assert.match(partial.summary, /Only part of the performance fee/)
+  assert.match(partial.summary, /stays owed/)
+  assert.match(partial.summary, /for period 4/)
+
+  // The pair. Collapse `type` or `summary` back to a constant — which is what shipped, and what
+  // this rule's own comment recorded as a limit rather than hedging the copy — and one of these
+  // four goes red naming the fact that was lost.
+  assert.notEqual(partial.type, charged.type)
+  assert.notEqual(partial.summary, charged.summary)
+  assert.ok(!partial.summary.includes('was charged'), 'the partial reused the charged sentence')
+  assert.ok(!charged.summary.includes('stays owed'), 'the charged reused the partial sentence')
+
+  // ── NEITHER FIGURE IS PRINTED, IN EITHER BRANCH ───────────────────────────────────────────
+  // 1250 cents is $12.50 and 60 is $0.60. `trade` is a smallest-units producer, so `money`
+  // declines both and hub-web's decimal formatter would render the first as "1,250". The partial
+  // sentence is where the temptation lives — "we took $0.60 of $12.50" is the sentence a reader
+  // wants — and it is exactly the one that cannot be written from this payload.
   assert.equal(charged.amount, null)
-  assert.ok(!charged.summary.includes('1250'))
-  assert.deepEqual(Object.keys(charged.payload).sort(), ['__redacted', 'period'])
-  assert.deepEqual(charged.payload['__redacted'], ['botId', 'collected', 'entryId', 'settlementId'])
+  assert.equal(partial.amount, null)
+  for (const each of [charged, partial]) {
+    assert.ok(!each.summary.includes('1250'))
+    assert.ok(!each.summary.includes('60'))
+  }
+
+  // `status` is read, so it is declared, so it is stored — it is a flag and not a figure, and it
+  // is what a surface would group these rows by. `collected` and `due` are both dropped.
+  assert.deepEqual(Object.keys(charged.payload).sort(), ['__redacted', 'period', 'status'])
+  assert.equal(charged.payload['status'], 'charged')
+  assert.equal(partial.payload['status'], 'partial')
+  assert.deepEqual(charged.payload['__redacted'], ['botId', 'collected', 'due', 'entryId', 'settlementId'])
 
   // The key is the SETTLEMENT, a uuid that is not a person, and the actor is the owner off the
   // bot row. A key reader would file every fee against a settlement dressed up as a customer.
   assert.notEqual(charged.userId, SETTLEMENT)
+
+  // `uncollectable` is a status this emit cannot carry: `settleFee` publishes inside
+  // `if (collected > 0n)` and that guard stayed on purpose, because an uncollectable settlement
+  // moved no money and this topic renders as a charge. It is asserted anyway, in the only way that
+  // is honest — that an unexpected status falls back to the charged sentence rather than producing
+  // a third message no user can ever be shown, or an empty one.
+  const impossible = settled('uncollectable', '1250')
+  assert.equal(impossible.type, 'trading.fee_settled')
+  assert.equal(impossible.summary, charged.summary)
 })
 
 test('a filled exchange order does not render a buy as a sale', () => {
@@ -689,11 +791,12 @@ test('an exchange transfer names its asset and its direction, and files under tr
       delivery({
         topic: 'trade.transfer.settled',
         key: TRANSFER,
-        // `settleTransfer` — trade/src/transfers.ts. `asset`, not `assetCode`.
+        // `settleTransfer` — trade/src/transfers.ts. `assetCode` since micro-trade
+        // `fix/transfer-asset-code`; it was `asset` until then, which is what kept the column null.
         payload: {
           transferId: TRANSFER,
           userId: ALICE,
-          asset: 'EMBER',
+          assetCode: 'EMBER',
           direction,
           amount: '4000000000000000000',
           entryId: ENTRY,
@@ -718,17 +821,44 @@ test('an exchange transfer names its asset and its direction, and files under tr
   assert.notEqual(withdrawal.type, deposit.type)
   assert.notEqual(withdrawal.summary, deposit.summary)
 
-  // ── THE FIGURE IS 4 EMBER AND THE COLUMN STAYS NULL ─────────────────────────────────────
+  // ── THE FIGURE IS 4 EMBER AND THE AMOUNT COLUMN STAYS NULL ──────────────────────────────
   // This is the assertion that goes red if `trade` is removed from SMALLEST_UNIT_PRODUCERS: the
   // payload spells the field `amount`, so `money` would pass 4000000000000000000 straight into
   // the column, and hub-web renders that column with a thousands separator beside `assetCode`.
   assert.equal(deposit.amount, null)
-  // And `asset` is not `assetCode`, so the COLUMN is empty while the summary still names EMBER.
-  // Stated rather than fixed here: inventing a second spelling for a column every other producer
-  // gets right would hide a producer defect instead of leaving it visible.
-  assert.equal(deposit.assetCode, null)
-  assert.deepEqual(Object.keys(deposit.payload).sort(), ['__redacted', 'asset', 'direction', 'userId'])
+
+  // ── AND THE ASSET COLUMN IS POPULATED, WHICH IS THE HALF micro-org#367 ITEM 3 IS ABOUT ────
+  // `asset_code` was null on every exchange transfer, so the rows landed and could not be filtered
+  // or grouped by asset. The producer spelled the field `asset` while `classify` fills the column
+  // from `assetCode`, and this file declined to invent a second spelling for it — correctly: the
+  // producer was the wrong half, and a second reader here would have made the inconsistency
+  // permanent and invisible. trade renamed the field; the column fills.
+  assert.equal(deposit.assetCode, 'EMBER')
+  assert.equal(withdrawal.assetCode, 'EMBER')
+  assert.deepEqual(Object.keys(deposit.payload).sort(), ['__redacted', 'assetCode', 'direction', 'userId'])
   assert.deepEqual(deposit.payload['__redacted'], ['amount', 'entryId', 'transferId'])
+
+  // ── THE OLD SPELLING IS NOT ALSO ACCEPTED, AND THAT IS WHAT CATCHES A REVERT ─────────────
+  // Two mutations to kill, and only this case kills the second. Changing the reader back to
+  // `asset(event, 'asset')` goes red above; ADDING the old spelling as a fallback beside the new
+  // one does not, and a payload accepted under two names is one that has to be accepted under two
+  // names for ever. There is nothing to be compatible with — micro-trade emitted no transfer under
+  // the old spelling at all (mainnet `exchange_transfers` empty, `TRADE_EXCHANGE_ENABLED` set on
+  // neither network) and this service holds zero rows on any `trade.%` topic on either network, so
+  // a fallback branch would be dead code covering a case that never happened.
+  const legacy = classify(
+    delivery({
+      topic: 'trade.transfer.settled',
+      key: TRANSFER,
+      payload: { transferId: TRANSFER, userId: ALICE, asset: 'EMBER', direction: 'deposit', entryId: ENTRY },
+    }).envelope,
+    true,
+  )
+  assert.equal(legacy.assetCode, null, 'the pre-rename spelling was read; the rename can now be reverted silently')
+  assert.ok(!legacy.summary.includes('EMBER'))
+  // It is not stored either: `asset` is no longer declared, so it is dropped and named as dropped.
+  assert.ok(!('asset' in legacy.payload))
+  assert.ok(legacy.redactedKeys.includes('asset'))
 })
 
 /**
@@ -796,22 +926,33 @@ test('THE RULE: a forged producer on a trade topic is refused, not quarantined',
  * in `activity_records.payload` is not itself a leak, but the four columns beside it are what a
  * frontend renders, and every one of these amounts has been kept out of them deliberately.
  *
- * Add `collected`, `shards`, `amount` or `filledQty` to any of the four `payloadKeys` and this
- * goes red naming the topic and the key.
+ * Add `collected`, `due`, `usdCents`, `amount` or `filledQty` to any of the four `payloadKeys` and
+ * this goes red naming the topic and the key.
  */
 test('THE RULE: none of trade\'s four money topics stores a figure it declined to render', () => {
   const cases: readonly (readonly [TopicName, string, Record<string, unknown>, readonly string[]])[] = [
     [
       'trade.fill.settled',
       FILL,
-      { fillId: FILL, botId: BOT, side: 'buy', qty: '3', shards: '-45000', entryId: ENTRY },
-      ['qty', 'shards'],
+      { fillId: FILL, botId: BOT, userId: ALICE, side: 'buy', qty: '3', usdCents: '-45000', entryId: ENTRY },
+      ['qty', 'usdCents'],
     ],
     [
       'trade.fee.settled',
       SETTLEMENT,
-      { settlementId: SETTLEMENT, botId: BOT, period: '4', collected: '1250', entryId: ENTRY },
-      ['collected'],
+      {
+        settlementId: SETTLEMENT,
+        botId: BOT,
+        period: '4',
+        collected: '1250',
+        due: '1250',
+        status: 'charged',
+        entryId: ENTRY,
+      },
+      // `due` joins `collected` here rather than being declared: a consumer that wanted the
+      // shortfall would have to subtract two cent counts and then render the result, which is the
+      // figure this family refuses. `status` carries the fact instead, and is declared.
+      ['collected', 'due'],
     ],
     [
       'trade.order.filled',
@@ -834,7 +975,7 @@ test('THE RULE: none of trade\'s four money topics stores a figure it declined t
       {
         transferId: TRANSFER,
         userId: ALICE,
-        asset: 'EMBER',
+        assetCode: 'EMBER',
         direction: 'deposit',
         amount: '4000000000000000000',
         entryId: ENTRY,
