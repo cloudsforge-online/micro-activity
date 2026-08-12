@@ -326,6 +326,85 @@ test('trade\'s one and devplatform\'s two, through the real ingest path, land wh
   assert.equal(massRevocation?.visibility, 'internal')
 })
 
+/**
+ * **`asset_code` on an exchange transfer, read out of the COLUMN and not off a return value.**
+ *
+ * micro-org#367 item 3, and the reason it is worth a database test rather than only the classifier
+ * one in `unit.test.ts`. The defect was never "the classifier returns the wrong string" — it was
+ * that `asset_code` was NULL on every one of these rows, so they landed and could not be filtered
+ * or grouped by asset. That is a claim about a column, and the only test that can fail for the
+ * right reason is one that goes through `parseDelivery` -> `ingest` -> the table and then asks the
+ * database. `Classified.assetCode` reaching `activity_records.asset_code` is `records.ts`'s doing
+ * and not `classify.ts`'s, so a unit test on the classifier alone would stay green if the insert
+ * dropped the field.
+ *
+ * The producer half is micro-trade `fix/transfer-asset-code`, which renames the payload field from
+ * `asset` to `assetCode`. Both spellings are driven here: this repository cannot make the producer
+ * send the new one, so the honest statement is "the new spelling populates the column and the old
+ * one does not", which is also what makes a revert of the rename visible from this side.
+ */
+test('an exchange transfer fills the asset_code COLUMN, which is what a filter reads', { skip }, async () => {
+  const deps = ingestDeps(db())
+  const TRANSFER = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+  const LEGACY = 'dddddddd-dddd-4ddd-8ddd-ddddddddddde'
+  const ENTRY = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+  // `settleTransfer` — trade/src/transfers.ts. No actor: the payload names the user.
+  const transfer = async (key: string, assetField: string, minute: number) => {
+    await ingest(
+      deps,
+      parseDelivery(
+        delivery({
+          topic: 'trade.transfer.settled',
+          key,
+          payload: {
+            transferId: key,
+            userId: ALICE,
+            [assetField]: 'EMBER',
+            direction: 'deposit',
+            amount: '4000000000000000000',
+            entryId: ENTRY,
+          },
+          occurredAt: new Date(BASE + minute * 60_000),
+        }).body,
+      ),
+    )
+  }
+
+  await transfer(TRANSFER, 'assetCode', 1)
+  await transfer(LEGACY, 'asset', 2)
+
+  // The column, straight out of the table and keyed by the subject URN so the two rows cannot be
+  // confused. `listFeed` maps `asset_code` to `assetCode`, which is one rename away from hiding
+  // this, so the query names the column the schema does.
+  const rows = await sql<{ subject_urn: string; asset_code: string | null }[]>`
+    select subject_urn, asset_code from activity_records
+     where source_topic = 'trade.transfer.settled'
+     order by occurred_at asc
+  `
+  assert.deepEqual(rows.map((r) => r.asset_code), ['EMBER', null])
+  assert.ok(rows[0]?.subject_urn.endsWith(TRANSFER))
+
+  // And the thing the null cost: grouping. This is the query a "where did my EMBER go" surface
+  // runs, and before the rename it returned one bucket of nulls for every exchange transfer ever
+  // written. Both halves are asserted, so a fallback reader that quietly accepted the old spelling
+  // as well would go red here rather than passing twice.
+  const grouped = await sql<{ asset_code: string | null; n: string }[]>`
+    select asset_code, count(*)::text as n from activity_records
+     where source_topic = 'trade.transfer.settled'
+     group by asset_code order by asset_code asc nulls last
+  `
+  assert.deepEqual(grouped.map((g) => [g.asset_code, g.n]), [['EMBER', '1'], [null, '1']])
+
+  // The feed still reads it, and the summary still names the asset — the column is an ADDITION to
+  // what this entry already did, not a move. The pre-rename row keeps its record and its place in
+  // the feed: an unfilterable row is worth more than no row, which is why this was never urgent
+  // enough to invent a second spelling for.
+  const page = await listFeed(db(), { userId: ALICE, limit: 10, includeInternal: false })
+  assert.deepEqual(page.records.map((r) => r.assetCode), [null, 'EMBER'])
+  assert.equal(page.records.length, 2)
+  assert.match(page.records[1]?.summary ?? '', /^Your EMBER deposit into the exchange settled/)
+})
+
 test('the feed filters by category and by product', { skip }, async () => {
   const deps = ingestDeps(db())
   await deposit(ALICE, 1)

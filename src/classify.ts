@@ -412,9 +412,14 @@ function userFromPayload(envelope: EventEnvelope): string | null {
  * the actor is the owner whoever pressed the button and whatever route reached the emit. That is a
  * different and much stronger claim than "the person who acted is usually the person affected",
  * which is the claim that fails on `aetherholm.battle.resolved`. trade's other three topics do NOT
- * qualify: `trade.fill.settled` is emitted with no actor at all (`service:trade`), and
- * `trade.order.filled` and `trade.transfer.settled` name their user on the payload, where a reader
- * needs no argument at all.
+ * qualify, and `trade.fill.settled` stopped qualifying for a DIFFERENT reason than it used to. It
+ * was emitted with no actor at all until micro-trade `ee5e189`, so there was nothing on the
+ * envelope to read; it now emits `user:${fill.userId}` off the fill row, the same shape as the four
+ * above, and it still does not use this reader — because that same change put `userId` on the
+ * payload, and a payload that names the user needs no argument at all. That is the rule this reader
+ * is quarantined by, stated in the direction that matters: `userFromActor` is what a topic falls
+ * back to when the payload names nobody, not the better answer when both are available.
+ * `trade.order.filled` and `trade.transfer.settled` are the same case and always were.
  *
  * `parseActor` from contracts-events rather than a `startsWith('user:')`, because the actor
  * vocabulary is the contract's and this file must not hold a second opinion about it. That is not
@@ -1897,26 +1902,39 @@ export const CLASSIFIERS = Object.freeze({
    * asset code, a direction, a market, or the fact that the platform charged them.
    * ------------------------------------------------------------------------------------------ */
   /**
-   * **NOT EMITTED IN PRODUCTION TODAY, and that is a producer defect rather than a reason to skip
-   * the classifier.** Both `applyFill` and `settleFill` take an optional `emit`, and neither of
-   * `runBot`'s two call sites — the paper branch and the live one — passes one, so no
-   * `trade.fill.settled` has ever reached this service. Verified on `micro-trade` main on
-   * 2026-08-10. A classifier for a topic no producer sends is the same defect as a producer no
-   * classifier covers, and only the second has a compile error to announce it; this one is written
-   * now so that the day the emit is wired up the fills land classified rather than quarantined.
+   * **EMITTED SINCE micro-trade `ee5e189`, and this classifier predates the emit deliberately.**
    *
-   * **The payload names nobody, and `userFromActor` is the WRONG repair here.** The emit passes no
-   * actor at all, so `trade/src/outbox.ts` falls back to `service:trade` — there is no user on the
-   * envelope to read, and `userFromActor` would return null just as `userFromPayload` does. The
-   * owner exists and trade is holding it: `FillRecord.userId` is on the row `applyFill` returns and
-   * `settleFill` already passes it to `fillPostings`. Until it is on the payload every fill is an
-   * `internal` record — correct, because a classifier may not query a database to find an owner,
-   * and a `user`-visible record nobody can see reads on a dashboard as a delivered notification.
-   * Filed for micro-trade with the emit above.
+   * What stood here until that landed was the measurement rather than a complaint: `applyFill` and
+   * `settleFill` each took an OPTIONAL `emit`, neither of `tickBot`'s two call sites — the paper
+   * branch and the live one — ever passed one, and zero `trade.fill.settled` had reached this
+   * service or the mainnet `trade.outbox` in the life of the service. The classifier was written
+   * against a topic nothing sent on the argument that a classifier for a topic no producer sends is
+   * the same defect as a producer no classifier covers, and only the second has a compile error to
+   * announce it. That bet paid: the emit was wired up in trade with no edit needed on this side, so
+   * the first fill this service ever sees will be classified rather than quarantined. It has not
+   * seen one yet — `activity_records` holds zero rows on ANY `trade.%` topic on either network,
+   * counted 2026-08-12 — which is the state this classifier was always written for.
    *
-   * `userFromPayload` rather than a hard null, so the day trade adds the field the fills reach
-   * their owner's feed with no edit here. Same shape as the dead asset-code branch in
-   * `seasonRewardSummary`.
+   * trade closed it by making the argument REQUIRED rather than by passing the optional one, so a
+   * third call site that forgets it is a compile error in trade instead of another silence here.
+   * Both branches of `tickBot` publish, including the paper one — see the `entryId` note below,
+   * which is the reason a simulated fill is worth a record at all.
+   *
+   * **`userFromPayload` and `payloadKeys: ['userId', …]` are LIVE readers now, not aspirational
+   * ones.** They were written against a payload that did not carry the field — `FillRecord.userId`
+   * existed on the row `applyFill` returns and `settleFill` already passed it to `fillPostings`,
+   * but nothing put it on the wire — so every fill would have been demoted to `internal` by
+   * `classify`'s own owner check, which is the right answer when a classifier cannot find an owner
+   * and may not query a database to look one up. `ee5e189` put `userId` on the payload. The fills
+   * are `user`-visible records in their owner's feed from that commit forward, and the branch that
+   * used to be dead is the one that runs.
+   *
+   * **The envelope now names an actor too, and this reader still takes the PAYLOAD.** The emit
+   * passes `user:${fill.userId}` off the same row it reads `userId` from, so the two agree by
+   * construction and neither is a guess — but the payload is the reader that needs no citation, and
+   * `userFromActor` is quarantined to the six topics whose payload names nobody (see its header).
+   * Switching this entry to the actor would widen that set for no gain and would put a fill in
+   * whoever's feed a future emit decides to blame.
    */
   'trade.fill.settled': {
     payloadKeys: ['userId', 'side', 'entryId'],
@@ -1927,10 +1945,17 @@ export const CLASSIFIERS = Object.freeze({
     summary: (event) => {
       const side = text(event, 'side', 8)
       const traded = side === 'buy' ? 'bought' : side === 'sell' ? 'sold' : 'traded'
-      // `entryId` is null for a paper fill and a journal id for a live one — `runBot`'s paper
+      // `entryId` is null for a paper fill and a journal id for a live one — `tickBot`'s paper
       // branch makes no ledger call, because "posting it would put a simulation in the journal".
       // So the presence of the entry is the only thing on this payload that separates imaginary
       // money from real money, and a summary that did not say so would describe both identically.
+      //
+      // This discriminator did not lose its job when the emit was wired up; it GAINED one. trade
+      // publishes from the paper branch too, and says so on purpose, citing this line: the outbox
+      // is not the journal, and a simulated fill is a thing its owner asked for and should be able
+      // to see happening. Both branches therefore arrive on this topic, and the null entry is the
+      // only field that tells them apart — collapse it and every paper fill claims to have moved
+      // the reader's balance.
       return typeof payloadOf(event)['entryId'] === 'string'
         ? `Your trading bot ${traded} and the fill settled against your balance.`
         : `Your paper trading bot ${traded}. No real money moved.`
@@ -1943,23 +1968,46 @@ export const CLASSIFIERS = Object.freeze({
    * period and the journal entry, or it is not answerable at all. `contracts`' audit table decides
    * yes here for the same sentence.
    *
-   * **The figure cannot be shown and the summary does not pretend otherwise.** `collected` is a
-   * Shard count — smallest units, so `money` declines it — and it is not spelled `amount`, so it
-   * never reaches the `amount` column either. The fee is only charged when something was actually
-   * collected: `settleFee` emits inside `if (collected > 0n)`, so there is no zero-fee event to
-   * disambiguate and the summary can state the charge flatly.
+   * **Neither figure can be shown and the summary does not pretend otherwise.** `collected` and
+   * `due` are cent counts — smallest units, so `money` declines both — and neither is spelled
+   * `amount`, so neither reaches the `amount` column either. Everything below is therefore written
+   * to carry the FACT without the number, which is the constraint the whole of trade's block works
+   * under and the reason `status` rather than `due - collected` is what this entry reads.
    *
-   * **A partial collection is a different fact and is not distinguishable here.** `status` is
-   * `charged`, `partial` or `uncollectable` on trade's own row, and the payload carries none of the
-   * three — `{ settlementId, botId, period, collected, entryId }`. A user whose balance could not
-   * cover the fee has an outstanding `feeOwed` and this entry does not say so. Filed for
-   * micro-trade alongside the fill emit; not papered over with a hedge in the copy, because a
-   * sentence that says "some or all of a fee" is worse than one that says a fee was charged.
+   * **Two facts, and `status` is the discriminator — as of micro-trade `ee5e189`.** What stood here
+   * was the opposite claim, and it was true when it was written: the payload was
+   * `{ settlementId, botId, period, collected, entryId }`, `status` was a column on trade's own row
+   * and on nothing that crossed the wire, and a wallet that covered a twentieth of the fee produced
+   * a byte-identical event to one that covered all of it. This rule and notify's wrote that limit
+   * down against themselves on 2026-08-10 rather than hedging the copy — "a sentence that says
+   * 'some or all of a fee' is worse than one that says a fee was charged" — and trade sent `status`
+   * and `due` instead, which is the repair those two notes were asking for.
+   *
+   * A partial collection is not a smaller version of the same news. The customer's balance did not
+   * cover the assessment, `settleFee` writes the shortfall back to `feeOwed`, and the next period's
+   * `due` is `fee + feeOwed` — so the money is still owed and will be taken. A reader told "a
+   * performance fee was charged" has been told the matter is closed when it is not, and will next
+   * see a settlement that takes more than one period's fee with nothing in the feed explaining why.
+   * That is why this gets a `type` of its own and not just a second sentence: `type` is what a
+   * frontend switches an icon and an emphasis on, and the two entries above (`trade.bot.started`'s
+   * reservation and `trade.order.filled`'s side) split on exactly this test — a field of the
+   * payload separating two messages a reader must not confuse. `devplatform.key.issued` refuses the
+   * split for the complementary reason, that its distinction is already carried by `visibility`;
+   * nothing else on this record carries the difference between a fee taken and a fee half taken.
+   *
+   * **`uncollectable` cannot arrive here and the code must not pretend it can.** `settleFee` emits
+   * inside `if (collected > 0n)` and that guard deliberately stayed: an uncollectable settlement
+   * moved no money at all, and publishing it on a topic whose consumers render a charge would be a
+   * charge that did not happen. So the branch below is binary by construction, and the fallback is
+   * the charged sentence rather than a third one — a status this producer cannot send is not worth
+   * a message no user can ever be shown. A bot in arrears having no event of its own is a real gap
+   * and it is trade's to close with a topic of its own, filed on micro-org#367.
    */
   'trade.fee.settled': {
-    payloadKeys: ['period'],
+    payloadKeys: ['period', 'status'],
     category: 'trading',
-    type: 'trading.fee_settled',
+    type: (event) =>
+      text(event, 'status', 16) === 'partial' ? 'trading.fee_settled_partial' : 'trading.fee_settled',
     visibility: 'user',
     // The actor is the bot's OWNER off the row (`settleFee`), exactly as the pause and the two
     // bot-lifecycle entries above. NOT userFromKey: the key is the SETTLEMENT id (registry
@@ -1971,7 +2019,14 @@ export const CLASSIFIERS = Object.freeze({
       // only field on this payload that is neither an opaque id nor a figure that cannot be shown.
       const period = amount(event, 'period')
       const which = period === null ? '' : ` for period ${period}`
-      return `A performance fee was charged on your trading bot${which}. It is taken from the gain above the bot's previous high-water mark.`
+      // No figure in either sentence, and that is not squeamishness: `collected` and `due` are cent
+      // counts, `money` declines them for the reason its header gives, and a template that printed
+      // one would render $12.50 as 1250. The partial sentence therefore says the balance fell short
+      // and that the rest is still owed, which is what a reader can act on, and leaves the amount to
+      // the settlement screen that can look up the scale.
+      return text(event, 'status', 16) === 'partial'
+        ? `Only part of the performance fee on your trading bot was collected${which} — your balance did not cover it. The rest stays owed and comes out of the next settlement.`
+        : `A performance fee was charged on your trading bot${which}. It is taken from the gain above the bot's previous high-water mark.`
     },
   },
   /**
@@ -2029,14 +2084,33 @@ export const CLASSIFIERS = Object.freeze({
    *
    * **The asset is named and the figure is not, and that asymmetry is the point.** `amount` is base
    * units of the asset — `settleTransfer` writes `transfer.amount.toString()` off a `numeric(78,0)`
-   * column — so `money` declines it now that `trade` is a smallest-units producer. The asset code
-   * is spelled `asset` here rather than `assetCode`, so it does not reach the record's `assetCode`
-   * COLUMN either (`classify` fills that from `assetCode` only, and this file does not invent a
-   * second spelling for a column every other producer gets right). It is read into the SUMMARY
-   * instead, where "your EMBER deposit settled" is a sentence and "a transfer settled" is not.
+   * column — so `money` declines it now that `trade` is a smallest-units producer. The code is read
+   * into the SUMMARY, where "your EMBER deposit settled" is a sentence and "a transfer settled" is
+   * not, and into the `asset_code` COLUMN, which is what a feed filtered or grouped by asset reads.
+   *
+   * **The column was null on every one of these rows until micro-trade `fix/transfer-asset-code`,
+   * and the argument that used to stand here is the reason it was.** trade spelled the field
+   * `asset` while every other asset-bearing topic on the estate spells it `assetCode`; `classify`
+   * fills the column from `assetCode` alone, so the code reached the prose and nothing else. This
+   * file declined to invent a second spelling for the column and wrote the defect down instead —
+   * correctly, because a classifier that quietly accepted `asset` would have made the producer's
+   * inconsistency permanent and invisible, and a second reader is the thing the next author copies.
+   * The producer was the wrong half and the producer is what changed. The declaration and the
+   * reader below are now the ordinary ones, spelled the same as `wallet.deposit.confirmed`'s and
+   * `market.listing.sold`'s, and `asset_code` is populated for exchange transfers from the commit
+   * that renames the field forward.
+   *
+   * **Nothing to migrate, and that was measured on both sides rather than assumed.** trade's
+   * mainnet `exchange_transfers` holds zero rows and `TRADE_EXCHANGE_ENABLED` is set on neither
+   * network, so no event was ever emitted under the old spelling; and this service's own
+   * `activity_records` — mainnet 18,907 rows, testnet 10,257 — holds zero rows on ANY `trade.%`
+   * topic, so there is no stored row whose `asset_code` a backfill could fill in. Both counted
+   * 2026-08-12. The window in which this rename costs nothing is the one it was made in, which is
+   * also why reading the old spelling as a fallback would be worse than useless: it would keep a
+   * dead branch alive to cover a case that never happened.
    */
   'trade.transfer.settled': {
-    payloadKeys: ['userId', 'asset', 'direction'],
+    payloadKeys: ['userId', 'assetCode', 'direction'],
     category: 'transfer',
     type: (event) =>
       text(event, 'direction', 16) === 'withdrawal'
@@ -2045,9 +2119,10 @@ export const CLASSIFIERS = Object.freeze({
     visibility: 'user',
     userId: userFromPayload,
     summary: (event) => {
-      // `asset`, not `assetCode` — see the note above. The reader is the same one the column uses,
-      // so a code that would not be accepted there is not printed here either.
-      const code = asset(event, 'asset')
+      // `asset()`'s default field, which is `assetCode` — the same reader, on the same key, that
+      // `classify` fills the column from. One spelling and one validator: a code the column would
+      // refuse is not printed in the prose either, and the two cannot drift apart.
+      const code = asset(event)
       const named = code ? `${code} ` : ''
       return text(event, 'direction', 16) === 'withdrawal'
         ? `Your ${named}withdrawal from the exchange settled and is back in your wallet balance.`
