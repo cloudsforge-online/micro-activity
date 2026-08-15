@@ -1598,18 +1598,15 @@ export const CLASSIFIERS = Object.freeze({
     summary: () => 'A private key left the platform. That wallet is now self-custodied.',
   },
   /**
-   * **DEAD CODE TODAY: nobody emits this either**, and here the producer is not silent — it is
-   * using five other names. `mint/src/tokens.ts` declares `mint.token.created`, `.paid`,
-   * `.broadcast`, `.deployed` and `.failed`; `mint.deploy.confirmed` is not among them, and none
-   * of the five is registered. So the one fact the estate agreed to send is the one name mint does
-   * not use, while five real events arrive here as `unclassified`. Owner: micro-mint
-   * (`org/tools/estate-topic-gaps.json`, `unemitted:mint.deploy.confirmed`), re-verified against
-   * `mint/src` rather than taken on trust.
+   * **LIVE, and it was dead for most of this file's history.** The gap this comment used to record
+   * — "mint declares five other names and `mint.deploy.confirmed` is not among them" — is closed:
+   * `mint/src/tokens.ts` now exports it as `DEPLOYED_TOPIC` and `mint/src/topics.ts` lists it in
+   * `EMITTED_TOPICS`, so the one fact the estate agreed to send is the name mint uses. Re-verified
+   * against `mint/src` rather than taken on trust, which is how the original gap was found.
    *
-   * The other two entries that check named — `custody.key.exported` and
-   * `settlement.withdrawal.stuck` — have since been repaired by their own repositories
-   * (`custody/src/exports.ts`, `settlement/src/withdrawals.ts`), so those two
-   * classifiers are live. These are the two that are not.
+   * The two entries beside it that the same check named — `custody.key.exported` and
+   * `settlement.withdrawal.stuck` — were repaired by their own repositories first
+   * (`custody/src/exports.ts`, `settlement/src/withdrawals.ts`). All of them are now live.
    */
   'mint.deploy.confirmed': {
     payloadKeys: ['userId', 'name', 'contractAddress'],
@@ -1621,6 +1618,39 @@ export const CLASSIFIERS = Object.freeze({
       const name = text(event, 'name', 48)
       const address = text(event, 'contractAddress', 66)
       return `${name ? `${name} is` : 'Your contract is'} live${address ? ` at ${address}` : ''}.`
+    },
+  },
+  /**
+   * The platform paying for its own deploy, which is why it is `internal` beside a `user` sibling.
+   *
+   * A paid order derives a fresh deployer address that holds nothing, and mint asks settlement to
+   * top it up out of the treasury. The customer's token still deploys and `mint.deploy.confirmed`
+   * above is what they hear about; this is the estate's own plumbing, and an entry reading "we
+   * moved our money into our own address" in a person's feed would be noise attached to a fact
+   * they cannot act on. It belongs where an operator reads it — the same argument that files
+   * `settlement.sweep.completed` internally.
+   *
+   * **`userId` is `() => null` and the key is the trap it avoids.** The registry keys this topic by
+   * `token_id`, which is a uuid, so `userFromKey` would file every one of these under a "user" that
+   * is really a token row: well-formed, queryable, and wrong. The payload carries no `userId` at
+   * all, deliberately — mint's own header says the platform topping up its own deployer is not a
+   * fact about the customer.
+   *
+   * The summary carries no amount. `amountWei` is smallest units and the payload does not say how
+   * many decimals the chain has, so `money` declines it and the figure stays in the stored payload
+   * in its own units, where a reader who needs it knows what they are looking at.
+   */
+  'mint.deploy.funding_requested': {
+    payloadKeys: ['chain', 'network'],
+    category: 'token',
+    type: 'token.deploy_funding_requested',
+    visibility: 'internal',
+    userId: () => null,
+    summary: (event) => {
+      const chain = text(event, 'chain', 24)
+      const network = text(event, 'network', 24)
+      const where = chain ? ` on ${chain}${network ? ` ${network}` : ''}` : ''
+      return `A paid deploy asked the treasury for gas${where}.`
     },
   },
   'market.listing.sold': {
