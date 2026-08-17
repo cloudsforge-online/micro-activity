@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/activity",
-  "version": "2026.8.73",
+  "version": "2026.8.74",
   "private": true,
   "description": "The canonical activity feed. Subscribes to every domain topic and writes one immutable activity_record per user-visible event. Written only from the event bus.",
   "license": "MIT",
