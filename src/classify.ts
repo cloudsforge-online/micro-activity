@@ -2410,6 +2410,244 @@ export const CLASSIFIERS = Object.freeze({
       return `Your venue was booked${span}.${paid}`
     },
   },
+  /* ── agora — the square. Fourteen topics, one attribution rule, and two refusals ─────────────
+   *
+   * **Every one of these reads `payload.subject`, and none reads the envelope actor.** agora emits
+   * `actor: subject` on almost all fourteen, so `userFromActor` would work today and would be the
+   * wrong instrument: the actor is who acted, and half of this producer's events are acts performed
+   * ON somebody. `agora.voice.suspended` is the standing proof — its actor is the OPERATOR — and a
+   * classifier that reached for the actor because the payload looked thin would file a suspension
+   * in the moderator's timeline instead of the suspended person's. agora names the person on the
+   * payload precisely so that no consumer has to make that judgement; see its emit sites, which say
+   * so in those words.
+   *
+   * **A voice id is not a user id.** `voiceId`, `authorId`, `followeeId`, `barredId` and
+   * `createdBy` are all agora's own identifiers for a person and mean nothing to this service or to
+   * `activity_records.user_id`; writing one there would produce a row no feed query can ever match.
+   * That is why every entry below reads `subject` and none of them reads a voice.
+   *
+   * **The second party is never named.** A follow, a bar and a spark all involve two people, and
+   * only the actor's record is written here — the other party learns of it from agora's own
+   * notifications, which is where a fact about a stranger's account belongs. So `followeeId`,
+   * `barredId` and `authorId` are undeclared and dropped at ingest, not stored "in case".
+   *
+   * **Two topics are owned by nobody, deliberately.** `agora.report.filed` never names its
+   * reporter — agora refuses to put it on the bus, so nothing can be attributed — and
+   * `agora.whisper.sent` carries no subject either, because "who messaged whom, and when" is the
+   * metadata of a private conversation and a second service holding it is exactly the copy the
+   * whole design avoids. Both are `internal` with a null owner: the event is still recorded, which
+   * is the difference between a fact nobody owns and a fact nobody kept.
+   *
+   * No body, no handle of anybody else, and no post text reaches a summary here, because none of it
+   * reaches the bus in the first place.
+   */
+  'agora.post.created': {
+    payloadKeys: ['subject', 'kind'],
+    category: 'community',
+    type: 'agora.post_created',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    summary: (event) => {
+      // `kind` is agora's own three-way (`agora/src/posts.ts`): a reply, a quote, or a post.
+      const kind = text(event, 'kind', 16)
+      if (kind === 'reply') return 'You replied in the square.'
+      if (kind === 'quote') return 'You quoted a post.'
+      return 'You published a post.'
+    },
+  },
+  'agora.post.edited': {
+    payloadKeys: ['subject'],
+    category: 'community',
+    type: 'agora.post_edited',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    // Neither the old words nor the new are on the bus, so neither is in this sentence.
+    summary: () => 'You edited a post.',
+  },
+  'agora.post.deleted': {
+    payloadKeys: ['subject'],
+    category: 'community',
+    type: 'agora.post_deleted',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    summary: () => 'You deleted a post.',
+  },
+  'agora.spark.created': {
+    payloadKeys: ['subject'],
+    category: 'community',
+    type: 'agora.spark_created',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    // The AUTHOR's half of this — "somebody sparked your post" — is agora's own notification and
+    // is not duplicated here. This record is the sparker's own act, which is what a personal
+    // timeline is for, and `authorId` stays undeclared rather than filed under somebody's feed.
+    summary: () => 'You sparked a post.',
+  },
+  'agora.echo.created': {
+    payloadKeys: ['subject'],
+    category: 'community',
+    type: 'agora.echo_created',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    summary: () => 'You echoed a post.',
+  },
+  'agora.voice.renamed': {
+    payloadKeys: ['subject', 'from', 'to'],
+    category: 'community',
+    type: 'agora.voice_renamed',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    summary: (event) => {
+      // Both read unconditionally: a rename whose event lost one half still gets a true sentence,
+      // and a conditional read would declare a key this classifier cannot prove it uses.
+      const from = text(event, 'from', 32)
+      const to = text(event, 'to', 32)
+      if (from && to) return `You changed your handle from @${from} to @${to}.`
+      return to ? `You changed your handle to @${to}.` : 'You changed your handle.'
+    },
+  },
+  /**
+   * The SUSPENDED person's record, and the reason this whole block refuses `userFromActor`.
+   *
+   * The actor on this envelope is the operator (`agora/src/moderation.ts`), so the one topic here
+   * whose actor is not its subject is also the one whose news is most consequential to get right.
+   * agora returns `subject` from the row it is already updating for exactly this reader.
+   *
+   * `community` rather than `security`: a login is untouched, and the account is not disabled.
+   * What is withdrawn is the right to post in the square, which is a fact about the square.
+   */
+  'agora.voice.suspended': {
+    payloadKeys: ['subject', 'reason'],
+    category: 'community',
+    type: 'agora.voice_suspended',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    summary: (event) => {
+      // Operator-entered prose, so it is capped like every other free-text field that reaches a
+      // rendered summary.
+      const reason = text(event, 'reason', 96)
+      return reason
+        ? `Your ability to post in the square was suspended: ${reason}`
+        : 'Your ability to post in the square was suspended.'
+    },
+  },
+  'agora.follow.created': {
+    payloadKeys: ['subject', 'state'],
+    category: 'community',
+    type: 'agora.follow_created',
+    visibility: 'user',
+    // The FOLLOWER's, which is whose act it is. agora puts the follower's subject on the payload
+    // and leaves the followee a voice id, so this reader cannot accidentally become the other one.
+    userId: userFromSubjectField('subject'),
+    summary: (event) => {
+      // A locked voice's follow is pending until approved, and the two are different facts — the
+      // registry's description says so, and a feed that called both "followed" would tell someone
+      // they are following an account that has not let them in.
+      const state = text(event, 'state', 16)
+      return state === 'pending' ? 'You asked to follow a voice.' : 'You followed a voice.'
+    },
+  },
+  'agora.bar.created': {
+    payloadKeys: ['subject'],
+    category: 'community',
+    type: 'agora.bar_created',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    // `barredId` is undeclared on purpose. A bar is symmetric and total inside agora, but a second
+    // service holding "this account blocked that one" is a fact about two people, one of whom
+    // never agreed to it and cannot see this record.
+    summary: () => 'You barred a voice.',
+  },
+  'agora.circle.created': {
+    payloadKeys: ['subject', 'name'],
+    category: 'community',
+    type: 'agora.circle_created',
+    visibility: 'user',
+    userId: userFromSubjectField('subject'),
+    summary: (event) => {
+      const name = text(event, 'name', 48)
+      return name ? `You opened the circle ${name}.` : 'You opened a circle.'
+    },
+  },
+  /**
+   * NOBODY'S FEED, and this is the entry to read before adding a fifteenth.
+   *
+   * The payload is a thread id, two voice ids and a character count — no subject, because agora
+   * refuses to put one there. What could be reconstructed from a stream of these is who talks to
+   * whom and how often, which is the shape of a private conversation even with every word removed.
+   * So the event is recorded (losing it is worse) and owned by nobody, and `length` is not stored:
+   * this service has no use for it and a length is still a fact about a message.
+   */
+  'agora.whisper.sent': {
+    payloadKeys: [],
+    category: 'community',
+    type: 'agora.whisper_sent',
+    visibility: 'internal',
+    userId: () => null,
+    summary: () => 'A whisper was sent.',
+  },
+  /**
+   * THE REPORTER IS NOT IN THE PAYLOAD, and that is agora's decision rather than this file's.
+   *
+   * The subject of a report is never told who filed it, and agora's emit site argues that leaving
+   * the reporter off the bus is the only version of that rule which does not depend on every
+   * subscriber choosing not to show it. There is therefore nobody to attribute this to, and
+   * inventing an owner from the envelope actor would undo the guarantee in one line.
+   */
+  'agora.report.filed': {
+    payloadKeys: ['subjectKind'],
+    category: 'community',
+    type: 'agora.report_filed',
+    visibility: 'internal',
+    userId: () => null,
+    summary: (event) => {
+      const kind = text(event, 'subjectKind', 16)
+      return kind ? `A ${kind} was reported.` : 'Something was reported.'
+    },
+  },
+  /**
+   * The operator's log, not the affected person's.
+   *
+   * A suspension reaches the suspended reader through `agora.voice.suspended` above, which names
+   * them. This topic is keyed by the subject acted upon so that every action against one post or
+   * one voice is a single ordered stream — what an appeal is answered from — and it is `internal`
+   * with no owner because the operator is staff and the subject already has their own record.
+   */
+  'agora.moderation.acted': {
+    payloadKeys: ['action'],
+    category: 'community',
+    type: 'agora.moderation_acted',
+    visibility: 'internal',
+    userId: () => null,
+    summary: (event) => {
+      const action = text(event, 'action', 32)
+      return action ? `A moderator acted: ${action}.` : 'A moderator acted on a report.'
+    },
+  },
+  /**
+   * `internal`, but OWNED — and the pairing is deliberate rather than an oversight.
+   *
+   * The reader is about to be emailed this notification and will read it in agora itself; a second
+   * copy in their timeline saying a mail was sent is the same news told twice, so it stays out of
+   * the feed. It still resolves its owner, because an unowned record is one that `eraseUser` in
+   * `records.ts` cannot reach — an internal row is not an ownerless one.
+   *
+   * `detail` is undeclared and dropped. agora caps it at 200 characters of notification prose
+   * precisely so a mailer can build a subject line; this service builds nothing from it, and
+   * storing it would keep a fragment of somebody's notification in a service that has no reason
+   * to hold one.
+   */
+  'agora.notification.mail_requested': {
+    payloadKeys: ['subject', 'kind'],
+    category: 'community',
+    type: 'agora.notification_mailed',
+    visibility: 'internal',
+    userId: userFromSubjectField('subject'),
+    summary: (event) => {
+      const kind = text(event, 'kind', 24)
+      return kind ? `A ${kind} notification was mailed.` : 'A notification was mailed.'
+    },
+  },
 } as const satisfies Readonly<Record<TopicName, TopicClassifier>>)
 
 /* ------------------------------------------------------------------ classification */
