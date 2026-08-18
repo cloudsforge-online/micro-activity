@@ -1480,6 +1480,88 @@ test("a refunded withdrawal and a stuck one say opposite things about where the 
   assert.notEqual(stuck.type, CLASSIFIERS['settlement.withdrawal.stuck'].type)
 })
 
+test('a conversion fills the one category that had no producer, and prints both sides of the swap', () => {
+  const converted = classify(
+    delivery({
+      topic: 'wallet.conversion.completed',
+      // Keyed by the LEDGER ENTRY, which is the conversion's whole identity — micro-wallet keeps
+      // no conversions table, so this id is what `GET /v1/conversions/:id` takes.
+      key: ENTRY,
+      payload: {
+        userId: ALICE,
+        entryId: ENTRY,
+        fromAssetCode: 'SHARD',
+        fromAmount: '2500000000000000000',
+        fromAmountFormatted: '2.5',
+        toAssetCode: 'EMBER',
+        toAmount: '125000000000000000000',
+        toAmountFormatted: '125',
+        rateScale: 8,
+        quotedAt: '2026-08-17T09:00:00.000Z',
+      },
+    }).envelope,
+    true,
+  )
+
+  assert.equal(converted.category, 'conversion')
+  assert.equal(isCategory(converted.category), true)
+  assert.equal(converted.type, 'conversion.completed')
+  assert.equal(converted.visibility, 'user')
+  assert.equal(converted.subjectUrn, `urn:cloudsforge:wallet:conversion:${ENTRY}`)
+
+  // `userFromPayload`, not `userFromKey`. The key is a ledger entry id and every wallet topic
+  // carries its own `userId`; taking the key here would produce a well-formed uuid that belongs
+  // to nobody, and put this record in no feed at all.
+  assert.equal(converted.userId, ALICE)
+  assert.notEqual(converted.userId, ENTRY)
+
+  // BOTH figures, in the assets they are denominated in. A swap the user can only half read is
+  // the reason this went in — "You exchanged 2.5 SHARD" answers none of the question.
+  assert.equal(converted.summary, 'You exchanged 2.5 SHARD for 125 EMBER.')
+
+  // ── and neither of the smallest-units twins reaches the prose or the column (micro-org#199) ──
+  assert.doesNotMatch(converted.summary, /2500000000000000000/)
+  assert.doesNotMatch(converted.summary, /125000000000000000000/)
+  // No `amount`/`assetCode` on the record ON PURPOSE, unlike every other money topic: a conversion
+  // has two figures in two assets, and that column is rendered beside a single `assetCode`. Either
+  // one alone would be a wrong number in a real person's feed.
+  assert.equal(converted.amount, null)
+  assert.equal(converted.assetCode, null)
+
+  // `rateScale` and `quotedAt` are the quote's provenance, not the user's news, so they are
+  // undeclared and dropped at ingest rather than kept for ever in a column nothing reads.
+  assert.deepEqual(Object.keys(converted.payload).sort(), [
+    '__redacted',
+    'fromAmount',
+    'fromAmountFormatted',
+    'fromAssetCode',
+    'toAmount',
+    'toAmountFormatted',
+    'toAssetCode',
+    'userId',
+  ])
+  assert.deepEqual(converted.payload['__redacted'], ['entryId', 'quotedAt', 'rateScale'])
+
+  // ── The degraded sentences. A producer that stops sending a field must not print "undefined" ──
+  const partial = (payload: Record<string, unknown>) =>
+    classify(delivery({ topic: 'wallet.conversion.completed', key: ENTRY, payload }).envelope, true)
+      .summary
+
+  // Formatted figures gone: the assets still name the swap, and no raw integer takes their place.
+  // `money` declines a bare integer from wallet, which is in `SMALLEST_UNIT_PRODUCERS`.
+  const unformatted = partial({
+    userId: ALICE,
+    fromAssetCode: 'SHARD',
+    fromAmount: '2500000000000000000',
+    toAssetCode: 'EMBER',
+    toAmount: '125000000000000000000',
+  })
+  assert.equal(unformatted, 'You exchanged SHARD for EMBER.')
+
+  // Assets gone: there is nothing true left to say beyond that it happened.
+  assert.equal(partial({ userId: ALICE }), 'You exchanged one asset for another.')
+})
+
 /* ══════════════════════════════════════════════════════════════════════════════════════════════
  * ── SMALLEST UNITS NEVER REACH A PERSON (micro-org#199) ───────────────────────────────────────
  *
