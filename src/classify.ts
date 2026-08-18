@@ -1126,6 +1126,57 @@ export const CLASSIFIERS = Object.freeze({
     },
   },
   /**
+   * **The category that has existed since this file was written with nothing producing into it.**
+   *
+   * `categories.ts` has listed `conversion` from the start and no topic was classified into it, so
+   * a user who swapped one coin for another — often the largest thing they did that day — read a
+   * feed that did not mention it. micro-org#495 §4 registered the topic; this is the other half.
+   *
+   * **Both figures are rendered, and this is one of the few money topics where they can be.**
+   * wallet is in `SMALLEST_UNIT_PRODUCERS`, so `money` would decline a bare integer — but
+   * `convert()` already computes `fromAmountFormatted` and `toAmountFormatted` beside the raw
+   * pair (`wallet/src/money.ts`, `formatDisplay`), because it is the one service that can: the
+   * decimals come from `chainSpec`, and a classifier may not go and look those up. The smallest-
+   * units twins stay declared and are read (by `money`, which then prefers the formatted one), so
+   * they survive verbatim in `activity_records.payload` where nothing renders them as money.
+   *
+   * **No `amount` on the record, deliberately.** `classify` fills that column from a payload field
+   * named `amount` or `price`, and a conversion has two figures in two different assets — either
+   * one alone, printed beside a single `assetCode`, would be a wrong number in a user's feed. The
+   * sentence carries both or it carries neither.
+   *
+   * `userFromPayload`, as every wallet topic. The key here is the ledger ENTRY id, a uuid, so
+   * `userFromKey` would not fail — it would return a well-formed, queryable, wrong id.
+   */
+  'wallet.conversion.completed': {
+    payloadKeys: [
+      'userId',
+      'fromAssetCode',
+      'fromAmount',
+      'fromAmountFormatted',
+      'toAssetCode',
+      'toAmount',
+      'toAmountFormatted',
+    ],
+    category: 'conversion',
+    type: 'conversion.completed',
+    visibility: 'user',
+    userId: userFromPayload,
+    summary: (event) => {
+      // Every declared field is read before anything branches, for the reason
+      // `wallet.deposit_address.assigned` states: the allowlist test drives this against a payload
+      // whose every key is `undefined`, and a key read only inside a taken branch looks
+      // declared-but-never-read on the run where that branch is not taken.
+      const paid = money(event, 'fromAmount')
+      const got = money(event, 'toAmount')
+      const from = asset(event, 'fromAssetCode')
+      const to = asset(event, 'toAssetCode')
+      if (!from || !to) return 'You exchanged one asset for another.'
+      if (paid && got) return `You exchanged ${paid} ${from} for ${got} ${to}.`
+      return `You exchanged ${from} for ${to}.`
+    },
+  },
+  /**
    * The figure is settlement's `row.amount.toString()` — smallest units, and no formatted twin on
    * the payload (`settlement/src/withdrawals.ts`, `base(row)`). So the sentence names the
    * asset and the transaction and declines the number, which is the whole of what a user needs to
