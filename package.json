@@ -32,7 +32,7 @@
     "TypeScript sources.",
     "",
     "@cloudsforge/contracts-chain is a RUNTIME dependency and not a dev one, for the same reason",
-    "micro-notify's is: classify.ts asks it a question while classifying — RETIRED_ASSETS, so that",
+    "micro-notify's is: classify.ts asks it a question while classifying \u2014 RETIRED_ASSETS, so that",
     "no summary can name a wound-down asset to a player whatever a producer sends (micro-org #227).",
     "A guard that only existed under `pnpm test` would not be a guard."
   ],
@@ -41,6 +41,7 @@
     "@cloudsforge/contracts-chain": "link:../contracts/packages/chain",
     "@cloudsforge/contracts-events": "link:../contracts/packages/events",
     "@cloudsforge/db": "file:../runtime/packages/db",
+    "@cloudsforge/http": "file:../runtime/packages/http",
     "@cloudsforge/jobs": "file:../runtime/packages/jobs",
     "@cloudsforge/lifecycle": "file:../runtime/packages/lifecycle",
     "@cloudsforge/secrets": "file:../runtime/packages/secrets",

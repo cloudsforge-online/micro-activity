@@ -10,6 +10,7 @@
  * only that one away.
  */
 
+import { networkSql, type Sql as RuntimeSql } from '@cloudsforge/db'
 import { test, before, after, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import type { AddressInfo } from 'node:net'
@@ -94,7 +95,8 @@ async function withServer(
     logger: quietLogger(),
     metrics,
     verifier: options.verifier ?? workingVerifier(),
-    sql: db(),
+    sql: singleNetworkSql(db()),
+    singleNetwork: 'mainnet' as const,
     ingest: { ...ingestDeps(db()), metrics, logger: quietLogger() },
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))
@@ -403,3 +405,12 @@ test('an unknown path is 404 and does not mint a metric series of its own', { sk
     assert.equal(/nothing-here/.test(scrape), false)
   })
 })
+
+/**
+ * One handle, presented as the per-network selector the server now takes. The fixture runs against
+ * a single test database, so mainnet is the only configured network — which exercises the REFUSAL
+ * path for free: anything reaching for testnet throws rather than reusing this handle.
+ */
+function singleNetworkSql(db: unknown) {
+  return networkSql({ mainnet: db as RuntimeSql })
+}
