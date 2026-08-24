@@ -14,7 +14,7 @@
  */
 
 import postgres from 'postgres'
-import { assertSchemaAtLeast, type Sql as DbSql } from '@cloudsforge/db'
+import { assertSchemaAtLeast, type Sql as DbSql , networkSql, type Sql as RuntimeSql } from '@cloudsforge/db'
 import { JobQueue, JobRunner, type Sql as JobsSql } from '@cloudsforge/jobs'
 import { Verifier } from '@cloudsforge/auth'
 import { Lifecycle, httpProbe, installSignalHandlers, postgresProbe } from '@cloudsforge/lifecycle'
@@ -42,12 +42,21 @@ logger.info('starting', { version: env.version, schemaVersion: SCHEMA_VERSION })
 
 // 3. The database pool. Opened before the schema assertion for the obvious reason that the
 //    assertion is a query, and before the Lifecycle because the readiness probe closes over it.
-const sql = postgres(env.databaseUrl, {
+const poolOptions = {
   max: env.databasePoolMax,
   // postgres.js writes notices to stderr as unstructured text by default, which is how a
   // connection string ends up in a log the collector cannot parse.
   onnotice: () => {},
-})
+}
+const sql = postgres(env.databaseUrl, poolOptions)
+
+// ── ONE HANDLE PER NETWORK THIS DEPLOYMENT SERVES ────────────────────────────────────────────
+//
+// `ACTIVITY_DATABASE_URL_TESTNET` unset is the single-network case, which is every deployment until the
+// consolidation reaches this service. `networkSql` then holds one handle and REFUSES a testnet
+// request rather than answering it out of mainnet rows — substituting would be a query that
+// SUCCEEDS against the other estate and says nothing.
+const sqlTestnet = env.databaseUrlTestnet ? postgres(env.databaseUrlTestnet, poolOptions) : undefined
 
 // 4. Assert the schema. This does **not** migrate. Failing here rather than serving is the point:
 //    a replica of the new code answering requests against the old schema corrupts data quietly,
@@ -104,7 +113,12 @@ const server = createServer({
   logger,
   metrics,
   verifier,
-  sql: db,
+  // The SELECTOR, not a handle — routes use `ctx.sql`, resolved once per request.
+  sql: networkSql({
+    mainnet: sql as unknown as RuntimeSql,
+    ...(sqlTestnet ? { testnet: sqlTestnet as unknown as RuntimeSql } : {}),
+  }),
+  ...(env.singleNetwork ? { singleNetwork: env.singleNetwork as 'mainnet' | 'testnet' } : {}),
   ingest: {
     sql: db,
     logger,
