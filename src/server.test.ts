@@ -4,10 +4,16 @@
  * The auth-fault mapping is copied from the template and tested again here rather than assumed,
  * because it is the decision most easily got backwards: an unreachable JWKS is **503**, never 401.
  *
- * The route-level tests are the two halves of `POST /ingest`. A **service token** says who is
- * calling; a **delivery signature** says the body was not altered between the producer's outbox
- * and this handler. Neither implies the other, both are required, and each is tested by taking
- * only that one away.
+ * The route-level tests are the two halves of this module's event-bus inbox. A **service token**
+ * says who is calling; a **delivery signature** says the body was not altered between the
+ * producer's outbox and this handler. Neither implies the other, and the signature is the one
+ * that is required — see the route's own note.
+ *
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
+ * **THE PATH IS `ACTIVITY_INGEST_PATH`, NOT `/ingest`, SINCE WAVE M2.** Named rather than typed,
+ * so this suite and the route cannot disagree about it — and because the bare `/ingest` is now a
+ * route in its own right that answers 410, which a literal here would silently start driving.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════
  */
 
 import { networkSql, type Sql as RuntimeSql } from '@cloudsforge/db'
@@ -20,7 +26,7 @@ import { SignJWT, generateKeyPair } from 'jose'
 import { SIGNATURE_HEADER, signDelivery } from '@cloudsforge/contracts-events'
 import { AUDIENCE, Verifier } from '@cloudsforge/auth'
 import { Lifecycle } from '@cloudsforge/lifecycle'
-import { createServer } from './server.ts'
+import { ACTIVITY_INGEST_PATH, INGEST_PATHS, createServer } from './server.ts'
 import {
   ALICE,
   BOB,
@@ -115,7 +121,7 @@ const bob = () => sign({ sub: BOB, handle: 'bob', roles: ['player'] })
 const operator = () => sign({ sub: 'u-ops', handle: 'ops', roles: ['admin'] })
 
 const post = (url: string, token: string, body: string, signature: string) =>
-  fetch(`${url}/ingest`, {
+  fetch(`${url}${ACTIVITY_INGEST_PATH}`, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${token}`,
@@ -205,7 +211,7 @@ test('THE RULE: an HMAC-invalid delivery is refused and writes nothing', { skip 
     assert.equal((await post(h.url, token, tampered, event.signature)).status, 401)
 
     // No signature at all.
-    const unsigned = await fetch(`${h.url}/ingest`, {
+    const unsigned = await fetch(`${h.url}${ACTIVITY_INGEST_PATH}`, {
       method: 'POST',
       headers: { authorization: `Bearer ${token}` },
       body: event.body,
@@ -229,7 +235,7 @@ test('no token of any kind writes to the feed — only a signature does, and a t
     assert.equal(signed.status, 201, 'a fresh record; 200 is the duplicate case')
     // Unsigned, with the most privileged tokens the estate mints: refused, nothing written.
     for (const token of [await alice(), await operator()]) {
-      const res = await fetch(`${h.url}/ingest`, {
+      const res = await fetch(`${h.url}${ACTIVITY_INGEST_PATH}`, {
         method: 'POST',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
         body: event.body,
@@ -243,7 +249,7 @@ test('no token of any kind writes to the feed — only a signature does, and a t
 test('an unsigned ingest is 401 before the body is even parsed', { skip }, async () => {
   // Unparseable garbage with no signature: refused by the MAC check, which never parses.
   await withServer({}, async (h) => {
-    const res = await fetch(`${h.url}/ingest`, { method: 'POST', body: '{not json' })
+    const res = await fetch(`${h.url}${ACTIVITY_INGEST_PATH}`, { method: 'POST', body: '{not json' })
     assert.equal(res.status, 401)
   })
 })
@@ -394,6 +400,53 @@ test('the feed pages by cursor over HTTP, and the cursor is opaque', { skip }, a
 
     const forged = await fetch(`${h.url}/feed?cursor=bm90LWEtY3Vyc29y`, { headers: auth })
     assert.equal(forged.status, 400)
+  })
+})
+
+test('the retired shared /ingest answers 410 and names both successors', { skip }, async () => {
+  /*
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * WAVE M2's ONE BREAKING CHANGE, PINNED WHERE A PRODUCER WOULD MEET IT.
+   *
+   * Both merged modules mounted `POST /ingest` and they verify it with DIFFERENT secrets, so one
+   * mount cannot serve it honestly. Every alternative to this 410 fails silently in a direction
+   * somebody then has to diagnose: aliasing it to this module answers 401 `bad_signature` to every
+   * notify producer, which reads as a rotated or broken secret — the single most expensive
+   * misdiagnosis this estate makes — and an outbox relay retries a 401 for ever.
+   *
+   * So the assertions are about DIAGNOSABILITY, not merely about the status: the body must name
+   * both replacement paths, and the refusal must not depend on a signature. A 410 that only fired
+   * for correctly-signed bodies would be an oracle for which secret signed a given payload, and
+   * would answer 401 to exactly the producers that most need to read it.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  await withServer({}, async (h) => {
+    const event = delivery({ topic: 'wallet.deposit.confirmed', key: 'w-1', payload: { userId: ALICE } })
+    for (const [label, res] of [
+      [
+        'a correctly signed body',
+        await fetch(`${h.url}/ingest`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', [SIGNATURE_HEADER]: event.signature },
+          body: event.body,
+        }),
+      ] as const,
+      [
+        'an unsigned one',
+        await fetch(`${h.url}/ingest`, { method: 'POST', body: '{not json' }),
+      ] as const,
+    ]) {
+      assert.equal(res.status, 410, `${label} must get the same answer`)
+      const body = (await res.json()) as { error: { code: string; message: string; served: string[] } }
+      assert.equal(body.error.code, 'ingest_path_split')
+      assert.deepEqual(body.error.served, [...INGEST_PATHS])
+      // The message has to carry the fix, because the caller reading it is a background relay
+      // whose only other output is a retry.
+      assert.match(body.error.message, /\/ingest\/activity/)
+      assert.match(body.error.message, /\/ingest\/notify/)
+    }
+    // And it wrote nothing on the way past. A signed body reaching a 410 must not also be ingested.
+    assert.equal((await sql<{ n: number }[]>`select count(*)::int as n from activity_records`)[0]?.n, 0)
   })
 })
 

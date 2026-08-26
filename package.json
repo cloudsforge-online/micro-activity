@@ -2,7 +2,7 @@
   "name": "@cloudsforge/activity",
   "version": "2026.8.101",
   "private": true,
-  "description": "The canonical activity feed. Subscribes to every domain topic and writes one immutable activity_record per user-visible event. Written only from the event bus.",
+  "description": "The bus tail, in one process. ACTIVITY: the canonical activity feed \u2014 subscribes to every domain topic and writes one immutable activity_record per user-visible event, written only from the event bus. NOTIFY (absorbed in wave M2): event to notification mapping, preferences, templates, dedupe, digests, retries, delivery history, operator broadcasts and developer webhooks as one pipeline. Two databases, two migrators, two module-labelled job runners with independent concurrency budgets, one listener, and one event-bus inbox per module because they authenticate with different secrets.",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.9.0",
@@ -14,7 +14,7 @@
     "migrate": "node --import tsx src/migrator.ts",
     "typecheck": "tsc --noEmit",
     "_test": "--test-concurrency=1 is required, not a preference: every database test file truncates between cases, and node:test runs FILES in parallel by default. A TRUNCATE takes an AccessExclusiveLock, so one file's reset deadlocks against another file's inserts (40P01).",
-    "test": "node --import tsx --test --test-concurrency=1 src/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 src/*.test.ts src/notify/*.test.ts",
     "build": "tsc -p tsconfig.build.json",
     "check": "pnpm typecheck && pnpm test"
   },
@@ -34,7 +34,11 @@
     "@cloudsforge/contracts-chain is a RUNTIME dependency and not a dev one, for the same reason",
     "micro-notify's is: classify.ts asks it a question while classifying \u2014 RETIRED_ASSETS, so that",
     "no summary can name a wound-down asset to a player whatever a producer sends (micro-org #227).",
-    "A guard that only existed under `pnpm test` would not be a guard."
+    "A guard that only existed under `pnpm test` would not be a guard.",
+    "",
+    "nodemailer arrived with wave M2 and is a RUNTIME dependency, imported LAZILY and only once",
+    "SMTP_HOST is set. An unconfigured transport is a supported mode (see src/notify/email.ts), so",
+    "the module must not be needed to boot a deployment that sends no mail."
   ],
   "dependencies": {
     "@cloudsforge/auth": "file:../runtime/packages/auth",
@@ -46,11 +50,13 @@
     "@cloudsforge/lifecycle": "file:../runtime/packages/lifecycle",
     "@cloudsforge/secrets": "file:../runtime/packages/secrets",
     "@cloudsforge/telemetry": "file:../runtime/packages/telemetry",
+    "nodemailer": "^6.9.16",
     "postgres": "^3.4.5",
     "tsx": "^4.19.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/nodemailer": "^6.4.17",
     "jose": "^5.9.6",
     "typescript": "^5.7.2"
   }
