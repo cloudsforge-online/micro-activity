@@ -218,6 +218,52 @@ describe('notify’s credentials cannot be reached from activity-side code', () 
   })
 })
 
+describe('the two modules consume the IDENTICAL topic set', () => {
+  /*
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * **THE FACT THAT MAKES ONE SHARED `/ingest` IMPOSSIBLE RATHER THAN MERELY UNWISE.**
+   *
+   * The merge plan estimates the two consumed sets at "~84 vs ~86 topics". Measured, they are the
+   * same 85 topics, with nothing on either side alone.
+   *
+   * That is what settles the ingest question. A delivery envelope carries a topic, an id, a key and
+   * a payload — it does not carry a DESTINATION. If the two modules consumed different topics, one
+   * mount could at least route on the topic. They do not: every event either module accepts is an
+   * event the other accepts too, so a single mount holding both secret sets has NO information in
+   * the request that could tell the two sinks apart. It would have to fan everything to both — which
+   * would start notifying people about topics only the feed subscribes to, and writing feed rows for
+   * topics only the mailer cares about — or guess.
+   *
+   * Asserted rather than remembered, because the day the sets diverge is the day somebody could
+   * reasonably reopen the question, and they should find this test rather than the prose.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  it('is 85 topics on both sides, and nothing on either side alone', async () => {
+    const { CLASSIFIERS } = await import('./classify.ts')
+    const { MAPPED_TOPICS, NON_NOTIFYING_TOPICS } = await import('./notify/catalogue.ts')
+
+    const activityTopics = new Set(Object.keys(CLASSIFIERS))
+    const notifyTopics = new Set([...MAPPED_TOPICS, ...Object.keys(NON_NOTIFYING_TOPICS)])
+
+    // The vacuous guard first: two empty sets are also equal.
+    assert.ok(activityTopics.size > 50, `activity classifies only ${activityTopics.size} topics`)
+    assert.ok(notifyTopics.size > 50, `notify accepts only ${notifyTopics.size} topics`)
+
+    assert.deepEqual(
+      [...notifyTopics].filter((topic) => !activityTopics.has(topic)),
+      [],
+      'a topic notify accepts and activity does not — the sets have diverged, and a mount that ' +
+        'routed on the topic would now be conceivable',
+    )
+    assert.deepEqual(
+      [...activityTopics].filter((topic) => !notifyTopics.has(topic)),
+      [],
+      'a topic activity classifies and notify does not',
+    )
+    assert.equal(activityTopics.size, notifyTopics.size)
+  })
+})
+
 describe('the two ingest secrets are read in one place each', () => {
   /*
    * The concrete form of the whole boundary, and the reason `POST /ingest` had to split.

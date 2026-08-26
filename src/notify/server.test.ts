@@ -607,6 +607,68 @@ test('an unknown channel filter on the dead-letter view is a 400', async () => {
   assert.equal(response.status, 400)
 })
 
+test('paths match EXACTLY: a trailing slash is a 404, and that changed in wave M2', async () => {
+  /*
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   * A DELIBERATE BEHAVIOUR CHANGE, PINNED SO IT IS A DECISION RATHER THAN A SIDE EFFECT.
+   *
+   * This module used to carry a hand-written matcher that split both the request path and the route
+   * pattern on `/` and dropped empty segments — so `GET /preferences/` and `GET //preferences` both
+   * answered 200 as `/preferences`. It was the only matcher in the estate that did: activity,
+   * lantern and `service-template` all compile a route to an anchored regex, and the merged process
+   * uses that one (`../kernel.ts`).
+   *
+   * Restoring the tolerance was considered and refused, because the only place to put it is the
+   * SHARED kernel — which would silently start accepting `/feed/` on activity's side, where it has
+   * always been a 404. A merge must not loosen the module it merges INTO.
+   *
+   * Checked before accepting it: every caller in the estate builds an exact path —
+   * `hub-api/src/upstreams.ts` requests `/notifications?…`, `admin-api/src/upstreams.ts` requests
+   * `/admin/deliveries?…` and `/admin/deliveries/${encodeURIComponent(id)}/resend` — and no test in
+   * either repository used a trailing slash. So this asserts the new answer rather than restoring
+   * the old one, and it fails loudly if somebody later re-introduces normalisation without deciding
+   * to.
+   * ══════════════════════════════════════════════════════════════════════════════════════════════
+   */
+  // `start`, never `harness` directly: `start` registers the rig for the `after` hook that closes
+  // it. A listener nobody closes keeps the event loop alive and the whole file hangs after the last
+  // case rather than failing — which is exactly what a naked `harness()` here did once.
+  const rig = await start(USER)
+
+  for (const path of ['/preferences', '/notifications']) {
+    const exact = await fetch(`${rig.url}${path}`, { headers: { authorization: 'Bearer t' } })
+    assert.equal(exact.status, 200, `${path} must still answer`)
+
+    for (const variant of [`${path}/`, `/${path}`]) {
+      const res = await fetch(`${rig.url}${variant}`, { headers: { authorization: 'Bearer t' } })
+      assert.equal(res.status, 404, `${variant} matched, so the matcher has been loosened`)
+      assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'not_found')
+    }
+  }
+})
+
+test('a malformed percent-escape in the id is a 400, not a dead process', async () => {
+  /*
+   * The one thing that got strictly BETTER in the same refactor. The old matcher called
+   * `decodeURIComponent` inside the request listener, synchronously and outside any promise, so a
+   * malformed escape raised a `URIError` that reached `uncaughtException` and took the process down
+   * — an unauthenticated denial of service against every service in the merged pod. It is decoded
+   * in `idOf` now, where a throw is already a mapped 400.
+   *
+   * The assertion that matters is the SECOND request: the process is still answering.
+   */
+  const rig = await start(USER)
+  const res = await fetch(`${rig.url}/notifications/%zz/read`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer t' },
+  })
+  assert.equal(res.status, 400)
+  assert.equal(((await res.json()) as { error: { code: string } }).error.code, 'bad_request')
+
+  const after = await fetch(`${rig.url}/livez`)
+  assert.equal(after.status, 200, 'the listener must have survived the malformed escape')
+})
+
 test('the metrics route labels by pattern, never by the concrete path', async () => {
   const rig = await start()
   await fetch(`${rig.url}/notifications/55555555-5555-4555-8555-555555555555/read`, {
