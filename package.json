@@ -1,6 +1,6 @@
 {
   "name": "@cloudsforge/activity",
-  "version": "2026.8.103",
+  "version": "2026.8.104",
   "private": true,
   "description": "The bus tail, in one process. ACTIVITY: the canonical activity feed \u2014 subscribes to every domain topic and writes one immutable activity_record per user-visible event, written only from the event bus. NOTIFY (absorbed in wave M2): event to notification mapping, preferences, templates, dedupe, digests, retries, delivery history, operator broadcasts and developer webhooks as one pipeline. Two databases, two migrators, two module-labelled job runners with independent concurrency budgets, one listener, and one event-bus inbox per module because they authenticate with different secrets.",
   "license": "MIT",
